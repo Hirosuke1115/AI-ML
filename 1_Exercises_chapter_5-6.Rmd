@@ -1,0 +1,358 @@
+---
+title: "Exercises for chapter 5 - 6"
+author: "Hiro, Hendrik, Stefan"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: false
+    df_print: kable
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      fig.width = 8, fig.height = 5, fig.align = "center")
+```
+
+# 0. Data and train/test split
+
+We use `data_ml.RData` and keep the 2000-2018 window, as in the Chapters 1-4 homework. The first 80% of months form the training sample and the last 20% form the test sample. We do not shuffle observations, so the test period always comes after the training period.
+
+```{r data}
+library(tidyverse)
+library(lubridate)
+library(knitr)
+
+load("data_ml.RData")                                   # Load the raw dataset
+data_ml <- data_ml %>%
+  filter(date > "1999-12-31", date < "2019-01-01") %>%   # Keep only the 2000-2018 window
+  arrange(stock_id, date)                                # Sort by stock, then time
+
+features <- colnames(data_ml[3:95])                     # Book's full feature set: 93 predictors
+
+dates <- sort(unique(data_ml$date))                     # All distinct months, in order
+split_date <- dates[floor(0.8 * length(dates))]         # Date marking the 80% point in time
+
+training_sample <- data_ml %>% filter(date <= split_date)   # First 80% of months
+testing_sample  <- data_ml %>% filter(date >  split_date)   # Last 20% of months, no overlap
+y_test <- testing_sample$R1M_Usd
+
+# Small helpers for the text
+f4  <- function(x) formatC(x, format = "f", digits = 4)
+f6  <- function(x) formatC(x, format = "f", digits = 6)
+pct <- function(x) paste0(formatC(100 * x, format = "f", digits = 1), "%")
+```
+
+```{r split-table, echo = FALSE}
+tibble(Sample = c("Training", "Test"),
+       From = c(min(training_sample$date), min(testing_sample$date)),
+       To = c(max(training_sample$date), max(testing_sample$date)),
+       Observations = c(nrow(training_sample), nrow(testing_sample))) %>%
+  kable(caption = "Chronological 80/20 split")
+```
+
+# 1. OLS benchmark
+
+```{r ols}
+formula_full <- as.formula(paste("R1M_Usd ~", paste(features, collapse = " + ")))
+fit_ols <- lm(formula_full, data = training_sample)        # Plain least squares, no penalty
+
+pred_ols <- predict(fit_ols, newdata = testing_sample)     # Uses training coefficients only
+
+mse_ols <- mean((pred_ols - y_test)^2)                     # Test MSE
+hit_ols <- mean(pred_ols * y_test > 0)                     # Hit ratio: share of correct signs
+
+pred_naive <- rep(mean(training_sample$R1M_Usd), length(y_test))  # Always predict the training mean
+mse_naive  <- mean((pred_naive - y_test)^2)
+```
+
+```{r ols-table, echo = FALSE}
+tibble(Model = c("OLS (93 features)", "Naive (training mean)"),
+       `Test MSE` = c(mse_ols, mse_naive),
+       `Hit ratio` = c(hit_ols, mean(pred_naive * y_test > 0))) %>%
+  kable(digits = 5, caption = "OLS benchmark on the test sample")
+```
+
+**Answer.** OLS has a test MSE of `r f6(mse_ols)` and a hit ratio of `r pct(hit_ols)`. Its MSE is slightly *worse* than the naive forecast that always predicts the training mean (`r f6(mse_naive)`). OLS is a useful benchmark because ridge, LASSO and elastic net are OLS plus a penalty. OLS is the "penalty = 0" case, so any gain from the penalized models can be credited to the penalty. With 93 correlated features, OLS overfits noise, which is exactly the problem penalization should fix.
+
+# 2. LASSO coefficient paths
+
+```{r lasso}
+library(glmnet)
+
+y_penalized <- training_sample$R1M_Usd
+x_penalized <- training_sample %>% dplyr::select(all_of(features)) %>% as.matrix()
+x_test      <- testing_sample  %>% dplyr::select(all_of(features)) %>% as.matrix()
+
+fit_lasso <- glmnet(x_penalized, y_penalized, alpha = 1)   # alpha = 1 means LASSO penalty
+lasso_res <- summary(fit_lasso$beta)                       # Non-zero coefficients only
+lasso_res$Lambda  <- fit_lasso$lambda[lasso_res$j]         # Lambda for each coefficient
+lasso_res$Feature <- features[lasso_res$i] %>% as.factor() # Feature name for each coefficient
+
+# Order in which features become non-zero (largest lambda = survives longest)
+entry <- lasso_res %>%
+  group_by(Feature) %>%
+  summarize(lambda_in = max(Lambda),
+            sign = sign(x[which.max(Lambda)])) %>%         # Sign when the feature first appears
+  arrange(desc(lambda_in))
+
+top10 <- as.character(entry$Feature[1:10])                 # Readable subset: first 10 to enter
+```
+
+```{r lasso-plot, fig.cap = "LASSO coefficient paths, first 10 features to enter"}
+lasso_res %>%
+  filter(Feature %in% top10, Lambda > 0.001) %>%           # Hide the collinear region near zero
+  ggplot(aes(x = Lambda, y = x, color = Feature)) +
+  geom_line() + geom_hline(yintercept = 0, linetype = 2) +
+  ylab("beta") + theme_light() +
+  theme(legend.text = element_text(size = 7))
+```
+
+```{r lasso-table, echo = FALSE}
+entry %>% head(5) %>%
+  mutate(sign = ifelse(sign > 0, "+", "-")) %>%
+  kable(digits = 5, col.names = c("Feature", "Lambda at entry", "Sign"),
+        caption = "First five features to enter the LASSO path (= last to leave)")
+```
+
+**Answer.** As lambda increases, the penalty on the total absolute size of the coefficients grows. All coefficients shrink towards zero, and LASSO sets them *exactly* to zero one by one. At the largest lambda every coefficient is zero and the model predicts the mean. The last three non-zero features are `r entry$Feature[1]` (`r ifelse(entry$sign[1] > 0, "+", "-")`), `r entry$Feature[2]` (`r ifelse(entry$sign[2] > 0, "+", "-")`) and `r entry$Feature[3]` (`r ifelse(entry$sign[3] > 0, "+", "-")`). The negative size sign matches the small-cap effect: smaller firms earned more. The positive volatility sign goes against the low-volatility anomaly, possibly because volatile stocks also tend to be small. A negative `Pb` sign matches the value effect. These signs are partial effects, measured with the other features in the model, so the readings are conditional.
+
+# 3. Ridge versus LASSO
+
+```{r ridge}
+fit_ridge <- glmnet(x_penalized, y_penalized, alpha = 0)   # alpha = 0 means ridge penalty
+ridge_res <- summary(fit_ridge$beta)
+ridge_res$Lambda  <- fit_ridge$lambda[ridge_res$j]
+ridge_res$Feature <- features[ridge_res$i] %>% as.factor()
+```
+
+```{r ridge-plot, fig.cap = "Ridge coefficient paths, same 10 features (log scale)"}
+ridge_res %>%
+  filter(Feature %in% top10) %>%
+  ggplot(aes(x = Lambda, y = x, color = Feature)) +
+  geom_line() + geom_hline(yintercept = 0, linetype = 2) +
+  scale_x_log10() + ylab("beta") + theme_light() +
+  theme(legend.text = element_text(size = 7))
+```
+
+```{r nonzero}
+lambda_common <- 0.001                                      # One common lambda
+nz_lasso <- sum(coef(fit_lasso, s = lambda_common, exact = TRUE,     # Refit at exactly this lambda
+                     x = x_penalized, y = y_penalized)[-1] != 0)  # [-1] drops the intercept
+nz_ridge <- sum(coef(fit_ridge, s = lambda_common, exact = TRUE,
+                     x = x_penalized, y = y_penalized)[-1] != 0)
+```
+
+```{r nonzero-table, echo = FALSE}
+tibble(Model = c("LASSO", "Ridge"),
+       Lambda = lambda_common,
+       `Non-zero coefficients` = c(nz_lasso, nz_ridge)) %>%
+  kable(caption = "Number of non-zero coefficients at a common lambda")
+```
+
+**Answer.** Ridge paths shrink smoothly and approach zero only as lambda goes to infinity. LASSO paths hit zero at finite lambda and stay there. At lambda = `r lambda_common`, LASSO keeps `r nz_lasso` features while ridge keeps all `r nz_ridge`. The reason is the shape of the penalty. LASSO penalizes absolute values, which makes setting a small coefficient to zero worthwhile. Ridge penalizes squared values, which barely charges for small coefficients, so it shrinks them but never removes them. Ridge also spreads weight across correlated features (for example the three market-cap variables), while LASSO tends to pick one.
+
+# 4. Elastic-net sensitivity
+
+```{r enet, cache = TRUE}
+alpha_seq  <- (0:10) / 10                                   # 0 = ridge, 1 = LASSO
+lambda_seq <- 0.1^(0:5)                                     # 1 down to 0.00001
+
+enet_res <- lapply(alpha_seq, function(a){
+  fit_enet <- glmnet(x_penalized, y_penalized, alpha = a, lambda = lambda_seq)
+  pred <- predict(fit_enet, x_test)                         # One column per lambda
+  data.frame(alpha = a,
+             lambda = fit_enet$lambda,
+             rmse = sqrt(colMeans((pred - y_test)^2)),      # Test RMSE per lambda
+             nb_features = fit_enet$df)                     # Non-zero coefficients
+}) %>% bind_rows()
+
+rmse_naive <- sqrt(mse_naive)
+```
+
+```{r enet-plot, fig.cap = "Test RMSE across the elastic-net grid (darker = lower)"}
+enet_res %>%
+  ggplot(aes(x = factor(alpha), y = factor(lambda), fill = rmse)) +
+  geom_tile() +
+  geom_text(aes(label = sprintf("%.5f", rmse)), size = 2) +
+  scale_fill_gradient(low = "#0570EA", high = "white") +
+  labs(x = "alpha", y = "lambda", fill = "Test RMSE") +
+  theme_light()
+```
+
+```{r enet-table, echo = FALSE}
+enet_res %>% arrange(rmse) %>% head(5) %>%
+  kable(digits = 6, row.names = FALSE, caption = "Five best (alpha, lambda) combinations")
+```
+
+```{r best-grid}
+best_grid <- enet_res %>% slice_min(rmse, n = 1)          # Best (alpha, lambda) pair
+```
+
+**Answer.** The best combination is alpha = `r best_grid$alpha`, lambda = `r best_grid$lambda`, with a test RMSE of `r f6(best_grid$rmse)` against `r f6(rmse_naive)` for the naive forecast. Weak penalties (lambda ≤ 0.0001) do worst because they are close to OLS. For alpha > 0, lambda ≥ 0.1 removes every feature, so the model returns the mean. The differences are small: the whole grid spans about `r f6(max(enet_res$rmse) - min(enet_res$rmse))` in RMSE. That is under 0.1% of the RMSE itself, so the differences are economically negligible. We did not run a formal significance test. Given how small the gains are, we would not expect them to be statistically significant. Since the test sample also chose the winner, the true gain is likely even smaller.
+
+# 5. Out-of-sample comparison of linear models
+
+```{r compare}
+best_ridge <- enet_res %>% filter(alpha == 0) %>% slice_min(rmse, n = 1)
+best_lasso <- enet_res %>% filter(alpha == 1) %>% slice_min(rmse, n = 1)
+best_enet  <- enet_res %>% filter(alpha > 0, alpha < 1) %>% slice_min(rmse, n = 1)
+
+fit_pred <- function(a, l){
+  fit <- glmnet(x_penalized, y_penalized, alpha = a, lambda = l)   # Train on training sample
+  list(pred = as.numeric(predict(fit, x_test)), nz = fit$df)       # Test predictions, non-zero count
+}
+ridge <- fit_pred(best_ridge$alpha, best_ridge$lambda)
+lasso <- fit_pred(best_lasso$alpha, best_lasso$lambda)
+enet  <- fit_pred(best_enet$alpha,  best_enet$lambda)
+
+mse <- function(p) mean((p - y_test)^2)
+hit <- function(p) mean(p * y_test > 0)
+
+comparison <- tibble(
+  Model  = c("OLS", "Ridge", "LASSO", "Elastic net", "Naive (mean)"),
+  alpha  = c(NA, best_ridge$alpha, best_lasso$alpha, best_enet$alpha, NA),
+  lambda = c(NA, best_ridge$lambda, best_lasso$lambda, best_enet$lambda, NA),
+  `Test MSE`  = c(mse(pred_ols), mse(ridge$pred), mse(lasso$pred), mse(enet$pred), mse(pred_naive)),
+  `Hit ratio` = c(hit(pred_ols), hit(ridge$pred), hit(lasso$pred), hit(enet$pred), hit(pred_naive)),
+  Features    = c(length(features), ridge$nz, lasso$nz, enet$nz, 0))
+```
+
+```{r compare-table, echo = FALSE}
+kable(comparison, digits = 6, caption = "Test-sample comparison of linear models")
+```
+
+**Answer.** *Predictive performance:* the three penalized models beat OLS, but only in the fifth decimal of MSE, and the gains over the naive forecast are negligible (Exercise 4). Their hit ratios are close to `r pct(mean(y_test > 0))`, the share of positive returns in the test period. So they mostly reproduce "always predict up". *Interpretability:* ridge keeps all 93 features with tiny weights, LASSO keeps `r lasso$nz`, and the elastic net keeps `r enet$nz`. We retain the **elastic net** (alpha = `r best_enet$alpha`, lambda = `r best_enet$lambda`). It matches the best accuracy with few features, and its ridge part makes the selection more stable among correlated features than pure LASSO. The choice rests on simplicity, not on forecasting power.
+
+# 6. A simple regression tree
+
+```{r tree-simple}
+library(rpart)
+library(rpart.plot)
+
+formula <- as.formula(paste("R1M_Usd ~", paste(features, collapse = " + ")))
+fit_tree <- rpart(formula, data = data_ml,                  # Book settings (Chapter 6)
+                  minbucket = 3500, minsplit = 8000,        # Large leaves only
+                  cp = 0.0001, maxdepth = 3)                # At most 3 levels of splits
+```
+
+```{r tree-simple-plot, fig.cap = "Regression tree for R1M_Usd (depth 3)"}
+rpart.plot(fit_tree)
+```
+
+**Answer.**
+
+- **First split.** The tree first separates the cheapest stocks, those with a very low price-to-book ratio (`Pb` in roughly its lowest 2.5%). This group earns about 6% a month on average, far above the rest. It is a strong value effect, partly driven by distressed stocks.
+- **Path to a high-return leaf.** Take the other branch (not the cheapest), then small market cap (`Mkt_Cap_3M_Usd` low), then high long-term volatility (`Vol3Y_Usd` high). Small, volatile stocks earn about 4% a month.
+- **Leaf numbers.** The top number is the leaf's prediction: the average `R1M_Usd` of the training stocks in that leaf. The percentage below is the share of all observations that fall in the leaf.
+
+All features are scaled to 0-1 by rank, so a threshold reads as a percentile. This tree is fitted on the full 2000-2018 sample, as in the book, so it describes the data and is not an out-of-sample forecast.
+
+# 7. Tree complexity and pruning
+
+```{r tree-cp}
+fit_deep  <- rpart(formula, data = training_sample,
+                   minbucket = 3500, minsplit = 8000, cp = 0.001, maxdepth = 3)
+fit_small <- rpart(formula, data = training_sample,
+                   minbucket = 3500, minsplit = 8000, cp = 0.01,  maxdepth = 3)
+
+tree_stats <- function(fit){
+  c(Leaves      = sum(fit$frame$var == "<leaf>"),
+    `Train MSE` = mean((predict(fit, training_sample) - training_sample$R1M_Usd)^2),
+    `Test MSE`  = mean((predict(fit, testing_sample)  - y_test)^2))
+}
+cp_table <- rbind(`cp = 0.001` = tree_stats(fit_deep),
+                  `cp = 0.01`  = tree_stats(fit_small),
+                  `Naive (mean)` = c(1, var(training_sample$R1M_Usd), mse_naive))
+```
+
+```{r tree-cp-plot, fig.cap = "Tree with cp = 0.001"}
+rpart.plot(fit_deep)
+```
+
+```{r tree-cp-plot-small, fig.cap = "Tree with cp = 0.01", error = TRUE}
+rpart.plot(fit_small)   # If no split is kept, rpart.plot reports that the tree is just a root
+```
+
+```{r tree-cp-table, echo = FALSE}
+kable(cp_table, digits = 6, caption = "Tree size, training MSE and test MSE")
+```
+
+**Answer.** `cp` is the minimum relative gain a split must bring. With cp = 0.01 no split qualifies, so the tree is just the root and predicts the training mean. With cp = 0.001 the tree has `r cp_table[1, 1]` leaves: it fits the training data a little better and its test MSE is `r f6(cp_table[1, 3])` against `r f6(cp_table[2, 3])`. The gap is tiny, so neither tree generalizes clearly better. The leaf-size limits (3,500 stocks) already act as strong pruning and stop the deep tree from chasing outliers. Without them, a low cp grows many small leaves that fit noise, and test error rises (overfitting). Raising cp, or cutting a large tree back with `prune()`, removes splits that do not repeat out of sample.
+
+# 8. Regression tree versus classification tree
+
+```{r tree-class}
+add_label <- function(df){
+  df %>%
+    group_by(date) %>%                                       # Compare stocks within each month
+    mutate(R1M_Usd_C = as.factor(R1M_Usd > median(R1M_Usd))) %>%  # Above-median = TRUE
+    ungroup()
+}
+training_sample <- add_label(training_sample)                # Each month is wholly in one sample
+testing_sample  <- add_label(testing_sample)
+
+formula_C <- as.formula(paste("R1M_Usd_C ~", paste(features, collapse = " + ")))
+fit_tree_C <- rpart(formula_C, data = training_sample, method = "class",
+                    minbucket = 3500, minsplit = 8000, cp = 0.001, maxdepth = 3)
+
+pred_C   <- predict(fit_tree_C, testing_sample, type = "class")
+conf_mat <- table(Predicted = pred_C, Actual = testing_sample$R1M_Usd_C)
+acc_C    <- mean(pred_C == testing_sample$R1M_Usd_C)        # Accuracy = hit ratio for classes
+
+pred_reg <- predict(fit_deep, testing_sample)               # Regression tree from Exercise 7
+hit_reg  <- mean(pred_reg * y_test > 0)                     # Correct sign?
+
+share_pos  <- mean(y_test > 0)
+share_true <- mean(testing_sample$R1M_Usd_C == "TRUE")
+```
+
+```{r tree-class-plot, fig.cap = "Classification tree for R1M_Usd_C", error = TRUE}
+rpart.plot(fit_tree_C)
+```
+
+```{r tree-class-tables, echo = FALSE}
+kable(conf_mat, caption = "Confusion matrix, classification tree (test sample)")
+
+tibble(Model = c("Classification tree", "Regression tree"),
+       Target = c("Above median?", "Positive return?"),
+       `Hit ratio` = c(acc_C, hit_reg),
+       Baseline = c(max(share_true, 1 - share_true), share_pos),
+       `Share predicted up` = c(mean(pred_C == "TRUE"), mean(pred_reg > 0))) %>%
+  kable(digits = 3, caption = "Hit ratios against their own baselines")
+```
+
+**Answer.** The classification tree reaches an accuracy of `r pct(acc_C)`, close to a coin flip, since half of the stocks beat the median each month by construction. The regression tree's sign-based hit ratio is `r pct(hit_reg)`. That looks better, but it predicts "up" for `r pct(mean(pred_reg > 0))` of stocks, so it simply matches the share of positive returns (`r pct(share_pos)`). Neither tree beats its own baseline. A **regression tree** predicts a number: the average return of the training stocks in a leaf, chosen to minimize squared errors, so outliers can pull it. A **classification tree** predicts a class: the majority label in a leaf, chosen to make leaves pure (Gini index). Every stock counts once, so outliers matter less, but it gives only a direction, not a size.
+
+# 9. Trees across market regimes
+
+```{r tree-regimes}
+fit_2008 <- rpart(formula, data = data_ml %>% filter(year(date) == 2008),   # Crisis year
+                  cp = 0.001, maxdepth = 2)
+fit_2009 <- rpart(formula, data = data_ml %>% filter(year(date) == 2009),   # Rebound year
+                  cp = 0.001, maxdepth = 2)
+```
+
+```{r tree-regimes-plot-2008, fig.cap = "Shallow tree for 2008"}
+rpart.plot(fit_2008)
+```
+
+```{r tree-regimes-plot-2009, fig.cap = "Shallow tree for 2009"}
+rpart.plot(fit_2009)
+```
+
+```{r tree-regimes-table, echo = FALSE}
+imp <- function(fit) {
+  v <- fit$variable.importance
+  paste(names(v)[1:3], collapse = ", ")
+}
+tibble(Year = c(2008, 2009),
+       `Average monthly return` = c(mean(data_ml$R1M_Usd[year(data_ml$date) == 2008]),
+                                    mean(data_ml$R1M_Usd[year(data_ml$date) == 2009])),
+       `First split` = c(as.character(fit_2008$frame$var[1]), as.character(fit_2009$frame$var[1])),
+       `Top 3 features (importance)` = c(imp(fit_2008), imp(fit_2009))) %>%
+  kable(digits = 4, caption = "First split and most important features by year")
+```
+
+**Answer.** The first splits differ completely. In **2008** (average monthly return `r pct(mean(data_ml$R1M_Usd[year(data_ml$date) == 2008]))`), the tree splits on firm size (`Ev`): smaller firms lost less. Among larger firms, heavily traded stocks (`Share_Turn_12M`) lost most, consistent with investors selling the most liquid stocks first. In **2009** (`r pct(mean(data_ml$R1M_Usd[year(data_ml$date) == 2009]))` a month), the tree splits on volatility (`Vol1Y_Usd`): the riskiest stocks earned the most. Momentum then works in reverse: last year's biggest losers rebounded hardest. This is the "momentum crash" of Daniel & Moskowitz (2016). The same characteristic can change sign across regimes, which helps explain why trees fitted on the full sample find little stable signal. These readings are interpretations, not formal tests, and the smallest leaves contain few stocks, so their values are noisy.
