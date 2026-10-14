@@ -1,0 +1,321 @@
+---
+title: "Friday homework: random forests, AdaBoost and XGBoost"
+author: "Hiro, Hendrik, Stefan"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: false
+    df_print: kable
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      fig.width = 8, fig.height = 4.5, fig.align = "center")
+```
+
+# 0. Data and train/test split
+
+Same data, window and chronological 80/20 split as in the previous homeworks: the 2000-2018 window, the first 80% of months for training and the last 20% for testing, with no shuffling. `R1M_Usd` is the regression label and `R1M_Usd_C` (above the median return of its month) is the classification label. A seed is set before every model that uses random sampling, always the same one (42).
+
+```{r data}
+library(tidyverse)
+library(lubridate)
+library(knitr)
+library(randomForest)
+library(fastAdaboost)
+library(xgboost)
+
+load("data_ml.RData")                                   # Load the raw dataset
+data_ml <- data_ml %>%
+  filter(date > "1999-12-31", date < "2019-01-01") %>%   # Keep only the 2000-2018 window
+  arrange(stock_id, date)                                # Sort by stock, then time
+
+features <- colnames(data_ml[3:95])                     # Full feature set: 93 predictors
+features_short <- c("Div_Yld", "Eps", "Mkt_Cap_12M_Usd", "Mom_11M_Usd",
+                    "Ocf", "Pb", "Vol1Y_Usd")           # Short feature set: 7 predictors
+
+dates <- sort(unique(data_ml$date))                     # All distinct months, in order
+split_date <- dates[floor(0.8 * length(dates))]         # Date marking the 80% point in time
+
+add_label <- function(df){
+  df %>%
+    group_by(date) %>%                                   # Compare stocks within each month
+    mutate(R1M_Usd_C = as.factor(R1M_Usd > median(R1M_Usd))) %>%   # Above-median = TRUE
+    ungroup()
+}
+data_ml <- add_label(data_ml)
+
+training_sample <- data_ml %>% filter(date <= split_date)   # First 80% of months
+testing_sample  <- data_ml %>% filter(date >  split_date)   # Last 20% of months, no overlap
+y_test <- testing_sample$R1M_Usd
+
+formula_full  <- as.formula(paste("R1M_Usd ~",   paste(features,       collapse = " + ")))
+formula_short <- as.formula(paste("R1M_Usd ~",   paste(features_short, collapse = " + ")))
+formula_C     <- as.formula(paste("R1M_Usd_C ~", paste(features,       collapse = " + ")))
+
+mse <- function(p) mean((p - y_test)^2)                 # Test MSE
+hit <- function(p) mean(p * y_test > 0)                 # Hit ratio: share of correct signs
+pct <- function(x) paste0(formatC(100 * x, format = "f", digits = 1), "%")
+f6  <- function(x) formatC(x, format = "f", digits = 6)
+
+pred_naive <- rep(mean(training_sample$R1M_Usd), length(y_test))   # Always the training mean
+```
+
+```{r split-table, echo = FALSE}
+tibble(Sample = c("Training", "Test"),
+       From = c(min(training_sample$date), min(testing_sample$date)),
+       To = c(max(training_sample$date), max(testing_sample$date)),
+       Observations = c(nrow(training_sample), nrow(testing_sample))) %>%
+  kable(caption = "Chronological 80/20 split")
+```
+
+# 1. Random-forest regression benchmark
+
+```{r rf1}
+set.seed(42)
+fit_RF <- randomForest(formula_full, data = training_sample,   # Chapter 6-style settings
+                       sampsize = 10000, replace = FALSE,      # Each tree: 10,000 stocks, no repeats
+                       nodesize = 250,                         # At least ~250 stocks per leaf
+                       ntree = 40, mtry = 30)                  # 40 trees, 30 random features per split
+
+pred_RF <- predict(fit_RF, testing_sample)
+mse_RF <- mse(pred_RF)
+hit_RF <- hit(pred_RF)
+```
+
+```{r rf1-table, echo = FALSE}
+tibble(Model = c("Random forest (93 features)", "Naive (training mean)"),
+       `Test MSE` = c(mse_RF, mse(pred_naive)),
+       `Hit ratio` = c(hit_RF, hit(pred_naive)),
+       `Share predicted up` = c(mean(pred_RF > 0), 1)) %>%
+  kable(digits = 6, caption = "Random-forest regression on the test sample")
+```
+
+**Answer.** The random forest (93 features) has a test MSE of `r f6(mse_RF)` and a hit ratio of `r pct(hit_RF)`. Its MSE is slightly better than the naive forecast (`r f6(mse(pred_naive))`), but its hit ratio is slightly below the naive `r pct(hit(pred_naive))`. The forest predicts "up" for `r pct(mean(pred_RF > 0))` of the stocks, so the hit ratio mostly reflects the share of positive returns. The five tuning parameters work as follows.
+
+- **`ntree`** is the number of trees that are averaged. More trees make the average more stable.
+- **`mtry`** is the number of features a tree may consider at each split (30 of 93). A small `mtry` forces the trees to use different features.
+- **`sampsize`** is the number of stocks each tree is grown on (10,000). A smaller sample is faster and makes the trees more different from each other.
+- **`replace`** says whether this sample is drawn with replacement (bootstrap) or without. Here it is `FALSE`, so each tree sees 10,000 different stocks.
+- **`nodesize`** is the minimum size of the leaves (250). Larger leaves give smoother trees that are less likely to fit noise.
+
+# 2. How many trees?
+
+```{r rf2}
+set.seed(42)
+train_sub <- training_sample %>% slice_sample(n = 20000)   # One fixed training subset for all models
+
+ntrees <- c(10, 20, 40, 80, 160)
+rf_trees <- lapply(ntrees, function(nt){
+  set.seed(42)                                              # Same seed for every specification
+  fit <- randomForest(formula_short, data = train_sub,      # Short feature set (7 predictors)
+                      sampsize = 10000, replace = FALSE, nodesize = 250,
+                      ntree = nt, mtry = 4)                 # 4 of the 7 features tried at each split
+  p <- predict(fit, testing_sample)
+  tibble(Trees = nt, `Test MSE` = mse(p), `Hit ratio` = hit(p), `Share predicted up` = mean(p > 0))
+}) %>% bind_rows()
+```
+
+```{r rf2-out, echo = FALSE}
+kable(rf_trees, digits = 6, caption = "Random forest with 7 features: number of trees")
+
+rf_trees %>%
+  pivot_longer(-Trees) %>%
+  ggplot(aes(x = factor(Trees), y = value, group = name)) +
+  geom_line() + geom_point() +
+  facet_wrap(~name, scales = "free_y") +
+  labs(x = "Number of trees", y = NULL) + theme_light()
+```
+
+**Answer.** The test MSE falls from `r f6(rf_trees$"Test MSE"[1])` with 10 trees to `r f6(rf_trees$"Test MSE"[3])` with 40 trees and `r f6(rf_trees$"Test MSE"[5])` with 160 trees. Most of the gain comes with the first 20-40 trees. Going from 80 to 160 trees improves the MSE by only `r f6(rf_trees$"Test MSE"[4] - rf_trees$"Test MSE"[5])`. The hit ratio hardly moves (between `r pct(min(rf_trees$"Hit ratio"))` and `r pct(max(rf_trees$"Hit ratio"))`). So adding trees is worthwhile up to roughly 40-80 trees, because it removes randomness. After that it is cheap but brings almost nothing. More trees do not cause overfitting, but they cannot add information that the features do not contain.
+
+# 3. Feature randomness in random forests
+
+```{r rf3}
+fit_mtry <- function(m){
+  set.seed(42)
+  fit <- randomForest(formula_full, data = training_sample,    # Exercise 1 specification
+                      sampsize = 10000, replace = FALSE, nodesize = 250,
+                      ntree = 40, mtry = m)
+  all_trees <- predict(fit, testing_sample, predict.all = TRUE)$individual   # One column per tree
+  cors <- cor(all_trees)                                       # Correlation between trees' forecasts
+  p <- predict(fit, testing_sample)
+  tibble(mtry = m, `Test MSE` = mse(p), `Hit ratio` = hit(p), `Share predicted up` = mean(p > 0),
+         `Average correlation between trees` = mean(cors[upper.tri(cors)]))
+}
+rf_mtry <- bind_rows(fit_mtry(5), fit_mtry(30))
+```
+
+```{r rf3-out, echo = FALSE}
+kable(rf_mtry, digits = 6, caption = "Random forest: mtry = 5 versus mtry = 30")
+```
+
+**Answer.** Both models are practically equal: `r f6(rf_mtry$"Test MSE"[1])` with `mtry` = 5 and `r f6(rf_mtry$"Test MSE"[2])` with `mtry` = 30, and hit ratios of `r pct(rf_mtry$"Hit ratio"[1])` and `r pct(rf_mtry$"Hit ratio"[2])`. A larger `mtry` is not simply "better" or "worse". It is a trade-off. With a large `mtry`, every tree can use the strongest features at the top, so the trees look alike and averaging them removes less noise. With a small `mtry`, the trees are forced to use different features, so they become more different from each other and the average is more stable, but each single tree is weaker. In our run the average correlation between the trees' forecasts is low in both cases (`r f6(rf_mtry$"Average correlation between trees"[1])` and `r f6(rf_mtry$"Average correlation between trees"[2])`) and, against what we expected, not lower for `mtry` = 5. The difference is tiny, so with such weak signals the trees differ mainly because of the random subsamples and not because of `mtry`.
+
+# 4. Random-forest classification
+
+```{r rf4}
+set.seed(42)
+fit_RF_C <- randomForest(formula_C, data = training_sample,
+                         sampsize = 20000, replace = FALSE,             # 20,000 stocks per tree, as in the chapter
+                         nodesize = 250, ntree = 40, mtry = 30)
+
+pred_RF_C <- predict(fit_RF_C, testing_sample)
+conf_RF   <- table(Predicted = pred_RF_C, Actual = testing_sample$R1M_Usd_C)
+acc_RF_C  <- mean(pred_RF_C == testing_sample$R1M_Usd_C)
+
+share_true <- mean(testing_sample$R1M_Usd_C == "TRUE")
+share_pos  <- mean(y_test > 0)
+```
+
+```{r rf4-out, echo = FALSE}
+kable(conf_RF, caption = "Confusion matrix, random-forest classification (test sample)")
+
+tibble(Model = c("RF classification", "RF regression (Exercise 1)"),
+       Question = c("Above the monthly median?", "Positive return?"),
+       Score = c(acc_RF_C, hit_RF),
+       Baseline = c(max(share_true, 1 - share_true), share_pos),
+       `Share predicted up` = c(mean(pred_RF_C == "TRUE"), mean(pred_RF > 0))) %>%
+  kable(digits = 3, caption = "Accuracy and hit ratio against their own baselines")
+```
+
+**Answer.** The classification forest has a test accuracy of `r pct(acc_RF_C)`, practically the same as the `r pct(max(share_true, 1 - share_true))` that one gets by always predicting the more common class (a difference well within the sampling noise of about 0.2 points). The confusion matrix shows that it is almost a coin flip. The comparison with the regression forest (`r pct(hit_RF)` hit ratio, against a baseline of `r pct(share_pos)`) is informative because neither model clearly beats its own baseline. It is not apples-to-apples for three reasons. The two models answer different questions ("beats the monthly median?" versus "return above zero?"). Their baselines differ (`r pct(max(share_true, 1 - share_true))` versus `r pct(share_pos)`). And the regression forest predicts "up" for `r pct(mean(pred_RF > 0))` of the stocks, so its hit ratio mostly reflects the share of positive returns, while the classification forest predicts "up" for only `r pct(mean(pred_RF_C == "TRUE"))`.
+
+# 5. AdaBoost classifier
+
+```{r ada5}
+set.seed(42)
+train_ada <- training_sample %>% slice_sample(n = 10000)       # AdaBoost on a 10,000-stock subsample
+
+fit_ada <- adaboost(formula_C, data = as.data.frame(train_ada), nIter = 3)
+pred_ada <- predict(fit_ada, newdata = as.data.frame(testing_sample))$class
+acc_ada <- mean(pred_ada == testing_sample$R1M_Usd_C)
+```
+
+```{r ada5-out, echo = FALSE}
+tibble(Model = "AdaBoost, nIter = 3",
+       `Test accuracy` = acc_ada,
+       `Share predicted up` = mean(pred_ada == "TRUE")) %>%
+  kable(digits = 4, caption = "AdaBoost classification on the test sample")
+```
+
+**Answer.** AdaBoost with 3 iterations has a test accuracy of `r pct(acc_ada)`, which is a coin flip (baseline about 50%). AdaBoost builds a sequence of trees. At the start, all observations have the same weight. After each tree, the observations that it classified wrongly get a higher weight and the correct ones get a lower weight, so the next tree concentrates on the hard cases. At the end, the trees vote, and trees with fewer mistakes get more say in the vote.
+
+# 6. AdaBoost iterations
+
+```{r ada6}
+ada_iter <- lapply(c(3, 10, 20), function(k){
+  set.seed(42)
+  fit <- adaboost(formula_C, data = as.data.frame(train_ada), nIter = k)   # Same subsample, same settings
+  tibble(nIter = k,
+         `Training accuracy` = mean(predict(fit, newdata = as.data.frame(train_ada))$class == train_ada$R1M_Usd_C),
+         `Test accuracy` = mean(predict(fit, newdata = as.data.frame(testing_sample))$class == testing_sample$R1M_Usd_C))
+}) %>% bind_rows()
+```
+
+```{r ada6-out, echo = FALSE}
+kable(ada_iter, digits = 4, caption = "AdaBoost: number of iterations")
+```
+
+**Answer.** Training accuracy rises quickly: `r pct(ada_iter$"Training accuracy"[1])` with 3 iterations, `r pct(ada_iter$"Training accuracy"[2])` with 10 and `r pct(ada_iter$"Training accuracy"[3])` with 20. Test accuracy stays at `r pct(ada_iter$"Test accuracy"[1])`, `r pct(ada_iter$"Test accuracy"[2])` and `r pct(ada_iter$"Test accuracy"[3])`. The differences of about 0.2 percentage points are within the sampling noise of the test sample (standard error about 0.2 points). So more boosting does not always help. It fits the training sample better and better (up to 100%), which means it memorises noise, but this does not carry over to the future. A better in-sample fit is not evidence of predictive power.
+
+# 7. XGBoost regression benchmark
+
+```{r xgb7}
+train_xgb <- training_sample %>%
+  group_by(date) %>%
+  mutate(quintile = ntile(R1M_Usd, 5)) %>%                   # Quintile of the return within each month
+  ungroup() %>%
+  filter(quintile %in% c(1, 5))                              # Keep bottom and top quintile = extreme 40%
+
+dtrain <- xgb.DMatrix(data  = as.matrix(train_xgb[, features_short]),
+                      label = train_xgb$R1M_Usd)
+x_test_xgb <- as.matrix(testing_sample[, features_short])       # Evaluate on the FULL test sample
+
+xgb_params <- list(objective = "reg:squarederror",
+                   eta = 0.3,                 # Learning rate: weight of each new tree
+                   gamma = 0.1,               # Penalty on the number of leaves
+                   lambda = 1,                # Penalty on leaf values
+                   max_depth = 4,             # Depth of each tree
+                   subsample = 0.6,           # Share of rows used per tree
+                   colsample_bytree = 0.7,    # Share of features used per tree
+                   nthread = 2)
+
+set.seed(42)
+fit_xgb <- xgb.train(params = xgb_params, data = dtrain, nrounds = 30)
+pred_xgb <- predict(fit_xgb, x_test_xgb)
+mse_xgb <- mse(pred_xgb)
+hit_xgb <- hit(pred_xgb)
+```
+
+```{r xgb7-out, echo = FALSE}
+tibble(Model = c("XGBoost (7 features, extreme 40% of labels)", "Naive (training mean)"),
+       `Test MSE` = c(mse_xgb, mse(pred_naive)),
+       `Hit ratio` = c(hit_xgb, hit(pred_naive)),
+       `Share predicted up` = c(mean(pred_xgb > 0), 1)) %>%
+  kable(digits = 6, caption = "XGBoost regression on the full test sample")
+```
+
+**Answer.** With the book-style setup (7 features, only the bottom and top quintile of each month's training returns), XGBoost has a test MSE of `r f6(mse_xgb)` and a hit ratio of `r pct(hit_xgb)`. This is worse than the naive forecast (`r f6(mse(pred_naive))`, `r pct(hit(pred_naive))`). The model is trained only on extreme returns, so it learns to separate big winners from big losers. But it is evaluated on all stocks, most of which have ordinary returns, so its forecasts are more spread out than those of the random forest, and the sign is close to a coin flip. The shallower models in Exercise 8 do better on MSE.
+
+# 8. XGBoost complexity
+
+```{r xgb8}
+xgb_depth <- lapply(c(2, 4, 6), function(d){
+  set.seed(42)
+  fit <- xgb.train(params = modifyList(xgb_params, list(max_depth = d)),   # Only max_depth changes
+                   data = dtrain, nrounds = 30)
+  p <- predict(fit, x_test_xgb)
+  p_train <- predict(fit, as.matrix(training_sample[, features_short]))
+  tibble(max_depth = d,
+         `Train MSE` = mean((p_train - training_sample$R1M_Usd)^2),
+         `Test MSE` = mse(p), `Hit ratio` = hit(p), `Share predicted up` = mean(p > 0))
+}) %>% bind_rows()
+```
+
+```{r xgb8-out, echo = FALSE}
+kable(xgb_depth, digits = 6, caption = "XGBoost: max_depth")
+```
+
+**Answer.** `max_depth` is the number of levels in each tree. Deeper trees can capture interactions between features, but they also fit noise. The training MSE (measured on the full training sample) falls with depth (`r f6(xgb_depth$"Train MSE"[1])`, `r f6(xgb_depth$"Train MSE"[2])`, `r f6(xgb_depth$"Train MSE"[3])`), while the test MSE rises (`r f6(xgb_depth$"Test MSE"[1])`, `r f6(xgb_depth$"Test MSE"[2])`, `r f6(xgb_depth$"Test MSE"[3])`). This is the pattern of **overfitting**: more complexity helps in-sample and hurts out-of-sample. We see no sign of underfitting, because the simplest model (depth 2) is the best. Note that the level of the training MSE is not comparable with the test MSE, because the test period is more volatile. Only the trend across depths matters. The hit ratio stays at about 51-52% for all depths, below the naive `r pct(hit(pred_naive))`.
+
+# 9. Comparison and interpretation
+
+```{r final}
+reg_all <- bind_rows(
+  tibble(Model = "RF, 93 features, mtry 30 (Ex. 1)", `Test MSE` = mse_RF, `Hit ratio` = hit_RF,
+         `Share predicted up` = mean(pred_RF > 0)),
+  tibble(Model = paste0("RF, 7 features, ", rf_trees$Trees, " trees (Ex. 2)"),
+         `Test MSE` = rf_trees$`Test MSE`, `Hit ratio` = rf_trees$`Hit ratio`,
+         `Share predicted up` = rf_trees$`Share predicted up`),
+  tibble(Model = paste0("RF, 93 features, mtry ", rf_mtry$mtry, " (Ex. 3)"),
+         `Test MSE` = rf_mtry$`Test MSE`, `Hit ratio` = rf_mtry$`Hit ratio`,
+         `Share predicted up` = rf_mtry$`Share predicted up`),
+  tibble(Model = paste0("XGBoost, max_depth ", xgb_depth$max_depth, " (Ex. 7-8)"),
+         `Test MSE` = xgb_depth$`Test MSE`, `Hit ratio` = xgb_depth$`Hit ratio`,
+         `Share predicted up` = xgb_depth$`Share predicted up`)) %>%
+  mutate(Family = ifelse(grepl("^RF", Model), "RF", "XGB"))
+
+best_rf  <- reg_all %>% filter(Family == "RF")  %>% slice_min(`Test MSE`, n = 1)
+best_xgb <- reg_all %>% filter(Family == "XGB") %>% slice_min(`Test MSE`, n = 1)
+
+final_table <- tibble(
+  Model = c(best_rf$Model, best_xgb$Model, "Naive (training mean)"),
+  `Test MSE` = c(best_rf$`Test MSE`, best_xgb$`Test MSE`, mse(pred_naive)),
+  `Hit ratio` = c(best_rf$`Hit ratio`, best_xgb$`Hit ratio`, hit(pred_naive)),
+  `Share predicted up` = c(best_rf$`Share predicted up`, best_xgb$`Share predicted up`, 1))
+
+class_table <- tibble(Classifier = c("Random-forest classification (Ex. 4)", "Best AdaBoost (Ex. 5-6)"),
+                      `Test accuracy` = c(acc_RF_C, max(ada_iter$`Test accuracy`)))
+```
+
+```{r final-out, echo = FALSE}
+kable(final_table, digits = 6, caption = "Regression: best random forest and best XGBoost (chosen by test MSE)")
+kable(class_table, digits = 4, caption = "Classification accuracy")
+kable(reg_all %>% select(-Family) %>% arrange(`Test MSE`), digits = 6,
+      caption = "All regression models tried, ordered by test MSE")
+```
+
+**Answer.** **Random forests** grow many trees independently, each on a random subsample of stocks and features, and average them, which mainly reduces variance. **Boosting** grows trees one after another, each trying to correct the mistakes of the previous ones, which reduces bias but can overfit if there are too many or too deep trees. **MSE and hit ratio** measure different things: MSE punishes the size of errors, the hit ratio counts only the sign. The best XGBoost model (depth 2) has the lowest MSE (`r f6(best_xgb$"Test MSE")`) but a hit ratio of only `r pct(best_xgb$"Hit ratio")`. The best random forest has a higher MSE (`r f6(best_rf$"Test MSE")`) and a hit ratio of `r pct(best_rf$"Hit ratio")`, which comes mostly from predicting "up" for `r pct(best_rf$"Share predicted up")` of the stocks. The classification models are at about 50% accuracy. We would investigate the shallow **XGBoost** model further, because it has by far the largest MSE gain over the naive forecast (`r f6(mse(pred_naive))`, which is `r sprintf('%.1f', 100 * (mse(pred_naive) / best_xgb$"Test MSE" - 1))`% higher). Before using it as a signal, we would test whether the gain is statistically significant, whether it holds in other periods (the depth was chosen on the test sample), and whether the forecasts rank stocks well enough to make money in a portfolio after costs.
