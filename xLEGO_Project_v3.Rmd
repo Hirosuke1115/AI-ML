@@ -1,0 +1,717 @@
+---
+title: "LEGO as an investment: does the 2015 evidence predict out of sample?"
+author: "Hiro, Hendrik, Stefan"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: false
+    df_print: kable
+---
+
+```{r setup, include = FALSE}
+# chunk options used in the whole document
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,   # show code, hide messages and warnings
+                      fig.width = 8, fig.height = 4.5, fig.align = "center",   # default figure size and position
+                      # cached chunks are recomputed when this file or one of the data files changes
+                      cache.extra = tools::md5sum(c(knitr::current_input(),
+                                                    "DiB whole sample Dec 2015 prices.xlsx",
+                                                    "DiB whole sample Jan 2018 - Apr 2019 prices.xlsx")))
+```
+
+# 0. Research question and data
+
+Dobrynskaya and Kishilova (2022, *LEGO: The Toy of Smart Investors*, RIBF) find that retired LEGO sets earned about 11% a year on the secondary market between 1987 and 2015 and that the return of a set depends on its theme, size and year of release (Table 5 of the paper, R² = 0.47). Their regression is estimated and evaluated on the same sets, so it says which sets *did* appreciate, not which sets *will*. We ask two questions with the authors' own published data (Mendeley Data v9hhs66vm3):
+
+1. **Experiment 1, cross-sectional generalisation: do set characteristics generalise to sets a model has never seen?** Five-fold cross-validation by set: every model is estimated on 80% of the sets and evaluated on the other 20%. This tests generalisation across sets, not through time.
+2. **Experiment 2, forward-return predictability: did the LEGO premium persist after 2015, and is the forward return predictable?** The authors' second file gives monthly prices from January 2018 to April 2019 for the same sets, so we can compute the return an investor earned after December 2015 and test what information available in 2015 predicts it. The model is still estimated and scored on the same window, so this describes one period. Section 5 adds a forecast made in advance, as an investor could have done at the time.
+
+We compare the models of the course: OLS, ridge, LASSO, elastic net, a regression tree, a random forest and XGBoost, scored by out-of-sample R², RMSE, rank correlation and hit ratios.
+
+```{r data}
+library(tidyverse)      # data handling and plots
+library(lubridate)      # year() and month()
+library(readxl)         # read the Excel files
+library(glmnet)         # ridge, LASSO and elastic net
+library(rpart)          # regression tree
+library(randomForest)   # random forest
+library(sandwich)       # robust and clustered standard errors
+library(knitr)          # kable() tables
+has_xgb <- requireNamespace("xgboost", quietly = TRUE)   # TRUE if xgboost is installed
+if (has_xgb) library(xgboost)                            # load it only if it is there
+
+data_dir <- "."   # the two data files are in the same folder as this file
+
+# read the 2015 file: one row per set, as in the paper
+raw_2015 <- read_excel(file.path(data_dir, "DiB whole sample Dec 2015 prices.xlsx"),
+                       sheet = "DATA", na = c("", "NA", "ND"))   # "ND" means no data
+# short column names
+names(raw_2015) <- c("id", "theme", "name", "year", "pieces", "minifigs",
+                     "p_new_2015", "p_used_2015", "p_retail", "age", "size")
+
+# count the sets that fail each filter below (shown in Section 0.1)
+drop_counts <- raw_2015 %>%
+  mutate(across(c(minifigs, p_new_2015, p_used_2015), ~ suppressWarnings(as.numeric(.x)))) %>%   # text to numbers
+  summarise(`In the 2015 file` = n(),                                                 # all rows
+            `No retail price` = sum(is.na(p_retail) | p_retail <= 0),                 # retail price missing or 0
+            `New price 0 ("no sale") or missing` = sum(is.na(p_new_2015) | p_new_2015 <= 0),
+            `Minifigures missing` = sum(is.na(minifigs)),
+            `Released in 2015` = sum(year >= 2015, na.rm = TRUE))                     # would give a zero holding period
+
+# build the 2015 sample
+sets <- raw_2015 %>%
+  mutate(across(c(minifigs, p_new_2015, p_used_2015), as.numeric),   # text to numbers
+         id = as.character(id),                                      # id as text, to join with the 2018 file
+         theme = relevel(factor(theme), ref = "Miscellaneous"),       # same reference theme as the paper
+         size = factor(size, levels = 1:4),                          # size group: 1 = biggest, 4 = smallest
+         year_f = factor(year),                                      # release year as dummies
+         log_retail = log(p_retail)) %>%                             # log retail price
+  filter(p_new_2015 > 0, p_retail > 0, !is.na(minifigs),             # a price of 0 means "no sale"
+         year < 2015) %>%                                            # y15 below divides by 2015 - year
+  droplevels() %>%                                                   # remove empty factor levels
+  mutate(y15 = log(p_new_2015 / p_retail) / (2015 - year),           # annualised log return since release
+         prem15 = log(p_new_2015 / p_retail),                        # total log premium over retail in Dec 2015
+         log_p15 = log(p_new_2015))                                  # log price in Dec 2015
+
+# read the monthly prices, January 2018 to April 2019
+raw_1819 <- read_excel(file.path(data_dir, "DiB whole sample Jan 2018 - Apr 2019 prices.xlsx"),
+                       skip = 1, na = c("", "NA", "ND"))             # row 1 is a title
+month_cols <- names(raw_1819)[-(1:6)]                                # month headers are Excel date numbers
+names(raw_1819)[-(1:6)] <- as.character(as.Date(as.numeric(month_cols), origin = "1899-12-30"))   # turn them into dates
+prices_1819 <- raw_1819 %>%
+  mutate(id = as.character(id)) %>%                                  # id as text
+  select(id, matches("^20")) %>%                                     # keep id and the 16 month columns
+  pivot_longer(-id, names_to = "date", values_to = "p") %>%          # one row per set and month
+  mutate(date = as.Date(date), p = as.numeric(p)) %>%                # date and price as proper types
+  filter(!is.na(p), p > 0)                                           # keep months with a price
+
+# last observed price of each set (April 2019 for almost all sets)
+p_end <- prices_1819 %>%
+  group_by(id) %>%
+  slice_max(date, n = 1, with_ties = FALSE) %>%                      # latest month per set
+  ungroup() %>%
+  transmute(id, date_end = date, p_end = p)
+# price in January 2018
+p_jan18 <- prices_1819 %>% filter(date == as.Date("2018-01-01")) %>% transmute(id, p_jan18 = p)
+
+# forward returns after 2015
+sets <- sets %>%
+  left_join(p_end, by = "id") %>%                                    # add the last price
+  left_join(p_jan18, by = "id") %>%                                  # add the January 2018 price
+  mutate(h  = as.numeric(date_end - as.Date("2015-12-01")) / 365.25,   # years from Dec 2015 to the last price
+         h2 = as.numeric(date_end - as.Date("2018-01-01")) / 365.25,   # years from Jan 2018 to the last price
+         y_fwd  = log(p_end / p_new_2015) / h,                         # log return per year, Dec 2015 to 2019
+         y_fwd2 = ifelse(h2 > 0.5, log(p_end / p_jan18) / h2, NA))     # log return per year, Jan 2018 to 2019
+
+# helper: price of each set in one month, as a column with the given name
+p_at <- function(d, name) prices_1819 %>% filter(date == as.Date(d)) %>% transmute(id, !!name := p)
+sets <- sets %>% left_join(p_at("2019-04-01", "p_apr19"), by = "id")   # add the April 2019 price
+
+# for the machine-learning models: pool rare themes and early years.
+# the rule uses only the number of sets per level, not the returns
+sets <- sets %>%
+  mutate(theme_ml = fct_lump_min(theme, min = 15, other_level = "Other"),           # themes with < 15 sets become "Other"
+         year_ml  = factor(ifelse(year < 1995, "pre-1995", as.character(year))),   # years before 1995 in one group
+         pieces_sq = pieces^2)                                                       # pieces squared
+
+# small helpers for numbers in the text
+f3  <- function(x) formatC(x, format = "f", digits = 3)                       # 3 decimals
+f2  <- function(x) formatC(x, format = "f", digits = 2)                       # 2 decimals
+pct <- function(x) paste0(formatC(100 * x, format = "f", digits = 1), "%")    # percent with 1 decimal
+num <- function(x) format(x, big.mark = ",")                                  # thousands separator
+# p-value as text; with B bootstrap draws the smallest possible p is 1 / (B + 1)
+pfmt <- function(p, B = 999) ifelse(p <= 1 / (B + 1) + 1e-12, "&le; 0.001",
+                                     ifelse(p < 0.001, "< 0.001", paste("=", formatC(p, format = "f", digits = 3))))
+SEED <- 42   # random seed used everywhere
+```
+
+```{r headline}
+# simple return of each set from Dec 2015 to Apr 2019
+head_fwd <- sets %>% filter(!is.na(p_apr19)) %>% transmute(R = p_apr19 / p_new_2015 - 1)
+head_median <- median(head_fwd$R)   # the typical set
+head_mean   <- mean(head_fwd$R)     # equal-weighted portfolio of all sets
+head_up     <- mean(head_fwd$R > 0) # share of sets that gained
+```
+
+```{r data-table, echo = FALSE}
+# the four return variables used in the report
+vars <- list(`Return since release to Dec 2015 (y15, log, p.a.)` = sets$y15,
+             `Premium over retail in Dec 2015 (prem15, log)` = sets$prem15,
+             `Forward return Dec 2015 to Apr 2019 (y_fwd, log, p.a.)` = sets$y_fwd,
+             `Forward return Jan 2018 to Apr 2019 (y_fwd2, log, p.a.)` = sets$y_fwd2)
+# one row of summary statistics per variable
+tibble(Variable = names(vars),
+       Sets = map_int(vars, ~ sum(!is.na(.x))),               # number of sets with a value
+       Mean = map_dbl(vars, mean, na.rm = TRUE),
+       Median = map_dbl(vars, median, na.rm = TRUE),
+       SD = map_dbl(vars, sd, na.rm = TRUE),
+       `Share > 0` = map_dbl(vars, ~ mean(.x > 0, na.rm = TRUE))) %>%   # share of positive values
+  kable(digits = 3, caption = paste0("The sample: ", num(nrow(sets)), " retired sets with a retail price and a December 2015 secondary-market price"))
+```
+
+**Answer.** The sample is the paper's: `r num(nrow(sets))` retired sets released between `r min(sets$year)` and `r max(sets$year)`. Up to December 2015 the average set earned `r pct(mean(sets$y15))` a year in log terms (median `r pct(median(sets$y15))`) and `r pct(mean(sets$y15 > 0))` of sets were above their retail price. The paper reports about 11% a year; its return definition may differ from our mean annualised log return, and our median is the closer figure. After 2015 the picture changes. From December 2015 to April 2019 the median set's price changed by `r pct(head_median)` and an equal-weighted portfolio of all sets by `r pct(head_mean)`, in simple returns before costs; `r pct(head_up)` of sets gained. The models below use annualised log returns, whose mean (`r pct(mean(sets$y_fwd, na.rm = TRUE))` a year) lies below the log of the average return, so it looks worse than the portfolio figure. Both describe the same prices; the headline figures in this report are the simple returns.
+
+## 0.1 Data source, comparability and dropped sets
+
+**Source.** The sheet "About the sample" in the 2015 file describes BrickPicker's price guide: eBay sold auctions, bought via Terapeak, "aggregate[d] into our monthly Price Guide"; values "are approximate ones and are several months old". The prices are therefore monthly aggregates of realised eBay sales, not single trades or asking prices. The 2018-2019 file does not name its source.
+
+**Are the two files comparable?** If the 2018-2019 file used another source or another condition (for example used instead of new sets), every forward return would shift by the same amount and look like a crash. We check this directly.
+
+```{r comparability}
+# sets that are in both files, with theme and year as written in the 2018 file
+cmp <- sets %>%
+  filter(!is.na(p_jan18)) %>%                                        # sets with a January 2018 price
+  inner_join(raw_1819 %>% transmute(id = as.character(id), theme_1819 = theme, year_1819 = `year of release`),
+             by = "id")
+# checks: same sets, and new or used condition
+cmp_stats <- tibble(
+  Check = c("Sets in both files", "Same theme in both files", "Same release year in both files",
+            "Median log change, Dec 2015 new price to Jan 2018", "Median log change, Dec 2015 used price to Jan 2018",
+            "Correlation of log prices, Dec 2015 new vs Jan 2018"),
+  Value = c(nrow(cmp),
+            mean(cmp$theme_1819 == as.character(cmp$theme)),                 # share with the same theme
+            mean(cmp$year_1819 == cmp$year),                                 # share with the same year
+            median(log(cmp$p_jan18 / cmp$p_new_2015)),                       # near 0 if 2018 holds new prices
+            median(log(cmp$p_jan18 / cmp$p_used_2015), na.rm = TRUE),        # near 0 if 2018 holds used prices
+            cor(log(cmp$p_jan18), log(cmp$p_new_2015))))
+```
+
+```{r comparability-table, echo = FALSE}
+# table of the checks
+kable(cmp_stats, digits = 3, caption = "Do the 2015 and 2018-2019 files describe the same sets in the same condition?")
+# table of dropped sets: the filter counts, then the sets without later prices
+kable(drop_counts %>% pivot_longer(everything(), names_to = "Reason", values_to = "Sets") %>%
+        bind_rows(tibble(Reason = c("Kept in the 2015 sample", "Of these, no Jan 2018 price", "Of these, no 2018-2019 price at all"),
+                         Sets = c(nrow(sets), sum(is.na(sets$p_jan18)), sum(is.na(sets$p_end))))),
+      caption = "Why sets leave the sample (a set can fail several checks)")
+```
+
+**Answer.** The files describe the same `r num(nrow(cmp))` sets: theme and release year agree for `r pct(cmp_stats$Value[2])` and `r pct(cmp_stats$Value[3])` of them. Prices line up with the 2015 *new* price (median log change `r f3(cmp_stats$Value[4])`) and not with the *used* price (`r f3(cmp_stats$Value[5])`), so the 2018 file holds new-condition prices. A switch to used prices would show up as a median change near the used-price gap; it does not. This supports, but cannot prove, that both files use the same method. The check has limited power: it rules out a switch of condition, which moves prices by about `r pct(1 - exp(cmp_stats$Value[4] - cmp_stats$Value[5]))`, but not a change of method worth a few percent, which is the size of the effects studied below. Few sets are dropped, but those without prices are probably the least traded, so the sample tilts slightly towards liquid sets.
+
+# 1. Replication of the paper's regression (Table 5)
+
+```{r replication}
+# the paper's regression: total log premium on theme, size and year dummies
+fit_paper <- lm(log(p_new_2015 / p_retail) ~ theme + size + year_f, data = sets)
+```
+
+```{r replication-table, echo = FALSE}
+# our estimates next to the values printed in Table 5
+rep_tab <- tibble(Coefficient = c("Batman theme", "Discovery theme", "Size group 2 (vs 1)", "R squared"),
+                  `Our estimate` = c(coef(fit_paper)[c("themeBatman", "themeDiscovery", "size2")], summary(fit_paper)$r.squared),
+                  `Paper, Table 5` = c(0.4484, 0.6124, -0.2438, 0.4695)) %>%
+  mutate(Difference = `Our estimate` - `Paper, Table 5`)
+rep_maxdiff <- max(abs(rep_tab$Difference))     # largest gap, used in the text
+rep_npar    <- sum(!is.na(coef(fit_paper)))      # number of estimated parameters
+kable(rep_tab, digits = 4, caption = "Replication of Table 5")
+```
+
+**Answer.** The coefficients and the R² are close to the paper's: the largest difference in the table is `r f3(rep_maxdiff)`. Small differences can come from the sets with missing values that we drop. We therefore start from the authors' sample and specification. Note what the R² of `r f2(summary(fit_paper)$r.squared)` means: the regression has `r rep_npar` parameters for `r num(nrow(sets))` sets, all fitted and evaluated on the same data. The next section asks how much of this survives on sets the model has not seen.
+
+# 2. Experiment 1: cross-sectional generalisation (unseen sets)
+
+```{r cv-helpers}
+# feature sets. Dummies are built once on all sets, so every fold has the same columns
+f_paper <- ~ theme_ml + size + year_ml                                       # the paper's variables
+f_full  <- ~ theme_ml + size + year_ml + pieces + pieces_sq + minifigs + log_retail   # plus set characteristics
+f_mom   <- ~ theme_ml + size + year_ml + pieces + pieces_sq + minifigs + log_retail + prem15 + log_p15 + y15   # plus 2015 prices
+rhs_full <- c("theme_ml", "size", "year_ml", "pieces", "minifigs", "log_retail")   # same features for the tree models
+rhs_mom  <- c(rhs_full, "prem15", "log_p15", "y15")
+
+# fit one model on the training rows and predict the test rows
+fit_predict <- function(model, X_tr, y_tr, X_te, df_tr, df_te, rhs, seed = 42){
+  set.seed(seed)                                                       # same seed for every model
+  switch(model,
+    "Naive (mean)"  = rep(mean(y_tr), nrow(X_te)),                     # predict the training mean for every set
+    "OLS"           = { b <- coef(lm.fit(cbind(1, X_tr), y_tr))        # least squares with an intercept
+                        b[is.na(b)] <- 0                               # collinear columns get weight 0
+                        as.numeric(cbind(1, X_te) %*% b) },            # predictions for the test rows
+    "Ridge"         = as.numeric(predict(cv.glmnet(X_tr, y_tr, alpha = 0),   X_te, s = "lambda.min")),   # penalty chosen by CV
+    "LASSO"         = as.numeric(predict(cv.glmnet(X_tr, y_tr, alpha = 1),   X_te, s = "lambda.min")),
+    "Elastic net"   = as.numeric(predict(cv.glmnet(X_tr, y_tr, alpha = 0.5), X_te, s = "lambda.min")),
+    "Tree"          = predict(rpart(reformulate(rhs, "y"), data = df_tr,
+                                    minbucket = 30, cp = 0.001, maxdepth = 4, xval = 0), df_te),    # small tree, settings from the course
+    "Random forest" = predict(randomForest(reformulate(rhs, "y"), data = df_tr,
+                                           ntree = 300, mtry = max(2, floor(length(rhs) / 3)),   # 300 trees, 1/3 of features per split
+                                           nodesize = 10, sampsize = floor(0.7 * nrow(df_tr)), replace = FALSE), df_te),
+    "XGBoost"       = { if (!has_xgb) return(rep(NA_real_, nrow(X_te)))   # skip if xgboost is not installed
+                        fit <- xgb.train(params = list(objective = "reg:squarederror", eta = 0.05, max_depth = 3,
+                                                       subsample = 0.8, colsample_bytree = 0.8, lambda = 1, nthread = 2),
+                                         data = xgb.DMatrix(X_tr, label = y_tr), nrounds = 300, verbose = 0)
+                        predict(fit, X_te) })
+}
+
+# out-of-fold predictions for one target and one feature set.
+# group = NULL gives random folds by set; group = "theme" or "year" keeps each group in one fold
+cv_models <- function(df, target, formula_x, rhs, k = 5, seed = 42, group = NULL,
+                      models = c("Naive (mean)", "OLS", "Ridge", "LASSO", "Elastic net", "Tree", "Random forest", "XGBoost")){
+  df <- df %>%
+    filter(!is.na(.data[[target]]), if_all(all.vars(formula_x), ~ !is.na(.x))) %>%   # rows with no missing values
+    mutate(y = .data[[target]])                                                      # target column called y
+  X <- model.matrix(formula_x, data = df)[, -1, drop = FALSE]        # dummy matrix without the intercept
+  set.seed(seed)
+  if (is.null(group)) {
+    fold <- sample(rep(1:k, length.out = nrow(df)))                  # each set gets a random fold
+  } else {
+    g <- unique(df[[group]])                                         # list of groups
+    fold <- sample(rep(1:k, length.out = length(g)))[match(df[[group]], g)]   # each group gets a random fold
+  }
+  lapply(models, function(m){
+    pred <- rep(NA_real_, nrow(df))                                  # empty vector for the predictions
+    for (f in 1:k) {
+      tr <- fold != f                                                # training rows: all other folds
+      pred[!tr] <- fit_predict(m, X[tr, , drop = FALSE], df$y[tr],   # fit on them and predict fold f
+                               X[!tr, , drop = FALSE], df[tr, ], df[!tr, ], rhs, seed = seed + f)
+    }
+    tibble(Model = m, id = df$id, y = df$y, pred = pred)             # one row per set
+  }) %>%
+    bind_rows() %>%                                                  # all models in one table
+    filter(!is.na(pred))                                             # drops XGBoost if it is not installed
+}
+
+# scores of the out-of-fold predictions, one row per model
+score <- function(oof){
+  oof %>% group_by(Model) %>%
+    summarise(`OOS R2`     = 1 - mean((y - pred)^2) / mean((y - mean(y))^2),   # out-of-sample R squared
+              RMSE         = sqrt(mean((y - pred)^2)),
+              `Rank corr.` = if (sd(pred) == 0) NA else cor(pred, y, method = "spearman"),
+              `Median hit` = if (sd(pred) == 0) NA else mean((pred > median(pred)) == (y > median(y))),   # same side of the median
+              `Sign hit`   = mean(pred * y > 0),                                # same sign as the true value
+              `Share y > 0` = mean(y > 0),                                      # compare the sign hit with this
+              .groups = "drop") %>%
+    arrange(RMSE)                                                               # best model first
+}
+```
+
+```{r part2, cache = TRUE}
+# paper's variables: only the naive model and OLS
+oof_paper <- cv_models(sets, "y15", f_paper, c("theme_ml", "size", "year_ml"), models = c("Naive (mean)", "OLS"))
+# paper's variables plus characteristics: all models
+oof_full  <- cv_models(sets, "y15", f_full, rhs_full)
+
+# in-sample R squared of the same two regressions, for comparison
+r2_in <- c(paper = summary(lm(y15 ~ theme_ml + size + year_ml, sets))$r.squared,
+           full  = summary(lm(y15 ~ theme_ml + size + year_ml + pieces + pieces_sq + minifigs + log_retail, sets))$r.squared)
+
+# one results table
+res2 <- bind_rows(score(oof_paper) %>% mutate(Features = "Paper (theme, size, year)"),
+                  score(oof_full)  %>% mutate(Features = "Paper + pieces, minifigures, retail price")) %>%
+  select(Features, everything())
+```
+
+```{r part2-table, echo = FALSE}
+kable(res2, digits = 3, caption = "Held-out sets (5-fold CV by set). Target: annualised return since release to Dec 2015")
+```
+
+```{r part2-helpers, echo = FALSE}
+# values used in the text below
+res2_full <- res2 %>% filter(!grepl("^Paper \\(", Features), Model != "Naive (mean)")   # full features, real models
+best2 <- res2_full %>% slice_min(RMSE, n = 1)                                           # lowest error
+ols2_paper <- res2 %>% filter(grepl("^Paper \\(", Features), Model == "OLS")
+ols2_full  <- res2_full %>% filter(Model == "OLS")
+```
+
+**Answer.** Our target is the *annualised* return, so the R² values are lower than the paper's 0.47, which is for the cumulative return where the year dummies also absorb the holding period (in sample: `r pct(r2_in["paper"])` for the paper's features, `r pct(r2_in["full"])` with the extra features). On held-out sets the OLS with the paper's features keeps an out-of-sample R² of `r f3(ols2_paper$"OOS R2")`, so most of the explanatory power generalises: theme and year of release really do separate sets that appreciated from sets that did not. Adding pieces, minifigures and the retail price raises the out-of-sample R² of OLS to `r f3(ols2_full$"OOS R2")`. The best model is the **`r best2$Model`** with an out-of-sample R² of `r f3(best2$"OOS R2")` and a rank correlation of `r f3(best2$"Rank corr.")`; the rank correlations of the other models lie between `r f3(min(res2_full$"Rank corr."))` and `r f3(max(res2_full$"Rank corr."))`. Against OLS, the best penalised regression changes the out-of-sample R² by `r f3(max(res2_full$"OOS R2"[res2_full$Model %in% c("Ridge", "LASSO", "Elastic net")]) - ols2_full$"OOS R2")` and the best tree model by `r f3(max(res2_full$"OOS R2"[res2_full$Model %in% c("Tree", "Random forest", "XGBoost")]) - ols2_full$"OOS R2")`. (The penalised models choose their penalty by cross-validation inside each training fold; the tree, random forest and XGBoost use fixed settings from the course, so the model comparison is indicative, not a tuned contest.) The sign hit ratio is not informative here: `r pct(mean(sets$y15 > 0))` of sets have a positive return, so any model that predicts a positive return scores about that much. These folds hold out single sets, which still share theme and release year with many training sets; Section 2.2 holds out whole themes and whole years.
+
+## 2.1 Age as a number, target: cumulative premium (prem15)
+
+The cross-validation above scores predictions. Here we fit two OLS regressions once on all sets and test each coefficient. The year-of-release dummies are replaced by **age as one number** (years since release, the `age` column of the data file), so the model has one slope for "one more year of age". The target is the **cumulative** log premium over retail, `prem15 = log(p_new_2015 / p_retail)`, because the annualised return `y15` is divided by age and would make older sets look worse by construction. Stars use classical OLS standard errors; the second table repeats the test for the non-dummy variables with heteroskedasticity-robust (HC1) standard errors. The LASSO charts show how each coefficient shrinks to zero as the penalty grows.
+
+```{r sig-helpers}
+sets <- sets %>% mutate(age = as.numeric(age))   # age in years, from the data file
+
+# one OLS fit to one row per coefficient: estimate, standard error, t, p and stars
+coef_table <- function(fit, se = c("classical", "HC1")){
+  se <- match.arg(se)                                                # "classical" or "HC1"
+  b  <- coef(fit)                                                    # all coefficients
+  aliased <- names(b)[is.na(b)]                                      # collinear columns (lm gives NA)
+  b  <- b[!is.na(b)]                                                 # keep the estimated ones
+  V  <- if (se == "classical") vcov(fit) else vcovHC(fit, type = "HC1")   # covariance matrix
+  s  <- sqrt(diag(V))[names(b)]                                      # standard errors
+  t  <- b / s                                                        # t-statistics
+  p  <- 2 * pt(-abs(t), df = df.residual(fit))                       # two-sided p-values
+  bind_rows(tibble(Term = names(b), Estimate = b, SE = s, t = t, p = p),
+            tibble(Term = aliased, Estimate = NA_real_, SE = NA_real_, t = NA_real_, p = NA_real_)) %>%
+    mutate(Sig. = case_when(is.na(p) ~ "aliased", p < 0.01 ~ "***", p < 0.05 ~ "**", p < 0.1 ~ "*", TRUE ~ ""))
+}
+
+# several fits to one table: each cell is "estimate stars (SE)", fit statistics at the bottom
+reg_table <- function(fits, digits = 3){
+  fmt <- function(x) formatC(x, format = "g", digits = digits)       # "g" keeps very small numbers readable
+  cells <- imap(fits, function(fit, nm){
+    coef_table(fit) %>%
+      transmute(Term, !!nm := ifelse(is.na(Estimate), "aliased",
+                                     paste0(fmt(Estimate), Sig., " (", fmt(SE), ")")))
+  }) %>% reduce(full_join, by = "Term")                              # one column per model
+  terms <- unique(unlist(map(fits, ~ names(coef(.x)))))              # coefficient order as in the models
+  cells <- cells %>% slice(match(terms, Term)) %>% mutate(across(-Term, ~ replace_na(.x, "")))
+  stats <- map_dfc(fits, function(fit){
+    s <- summary(fit)
+    c(nobs(fit),                                                     # number of sets
+      formatC(s$r.squared, format = "f", digits = 3),
+      formatC(s$adj.r.squared, format = "f", digits = 3),
+      formatC(pf(s$fstatistic[1], s$fstatistic[2], s$fstatistic[3], lower.tail = FALSE), format = "e", digits = 2))   # F-test p
+  })
+  bind_rows(cells, bind_cols(Term = c("Sets (N)", "R squared", "Adjusted R squared", "F-test p-value"), stats))
+}
+
+# non-dummy variables only: classical and robust (HC1) tests side by side
+robust_check <- function(fits, keep){
+  imap_dfr(fits, function(fit, nm){
+    full_join(coef_table(fit, "classical") %>% select(Term, Estimate, t, p, Sig.),
+              coef_table(fit, "HC1") %>% select(Term, `t (HC1)` = t, `p (HC1)` = p, `Sig. (HC1)` = Sig.),
+              by = "Term") %>%
+      filter(Term %in% keep) %>%                                     # keep the listed variables
+      mutate(Model = nm, .before = 1,
+             Estimate = formatC(Estimate, format = "g", digits = 3))   # as text, so kable does not round small values to 0
+  })
+}
+cont_vars <- c("(Intercept)", "age", "pieces", "pieces_sq", "minifigs", "log_retail", "prem15", "log_p15", "y15")
+```
+
+```{r lasso-path-helper}
+# LASSO path on all sets. Predictors are standardised, so the betas can be compared.
+# lambda is chosen by 10-fold CV; the dashed lines show lambda.min and lambda.1se
+lasso_path <- function(df, target, formula_x, title, n_label = 8, seed = 42){
+  df <- df %>% filter(!is.na(.data[[target]]), if_all(all.vars(formula_x), ~ !is.na(.x)))   # same rows in X and y
+  X  <- scale(model.matrix(formula_x, data = df)[, -1, drop = FALSE])   # standardised predictors
+  set.seed(seed)
+  cv  <- cv.glmnet(X, df[[target]], alpha = 1)                       # LASSO with cross-validation
+  fit <- cv$glmnet.fit                                               # the full path
+  path <- as.matrix(fit$beta) %>%                                    # one column per lambda
+    as_tibble(rownames = "Variable") %>%
+    pivot_longer(-Variable, names_to = "step", values_to = "beta") %>%   # long format for ggplot
+    mutate(lambda = fit$lambda[as.integer(sub("^s", "", step)) + 1])     # lambda value of each step
+  # colour the variables that stay in the model longest
+  top <- path %>% group_by(Variable) %>%
+    summarise(enter = max(c(0, lambda[beta != 0])),                  # largest lambda with a non-zero beta
+              size  = abs(beta[which.min(lambda)]), .groups = "drop") %>%   # beta at the smallest lambda, to break ties
+    arrange(desc(enter), desc(size)) %>% slice_head(n = n_label) %>% pull(Variable)
+  path <- path %>% mutate(Label = ifelse(Variable %in% top, Variable, "Other"),
+                          Label = factor(Label, levels = c(top, "Other")))
+  n_sel <- sum(coef(cv, s = "lambda.min")[-1] != 0)                  # variables kept at lambda.min
+  p <- ggplot(path, aes(x = lambda, y = beta, group = Variable, colour = Label)) +
+    geom_hline(yintercept = 0, colour = "grey60") +                  # zero line
+    geom_line(data = filter(path, Label == "Other"), linewidth = 0.3) +   # other variables, thin grey
+    geom_line(data = filter(path, Label != "Other"), linewidth = 0.8) +   # top variables, coloured
+    geom_vline(xintercept = c(cv$lambda.min, cv$lambda.1se), linetype = 2) +
+    scale_x_log10() +                                                # lambda on a log scale
+    scale_colour_manual(values = c(setNames(scales::hue_pal()(length(top)), top), Other = "grey80"),
+                        breaks = c(top, "Other")) +
+    labs(title = title,
+         subtitle = paste0("Dashed: lambda.min = ", signif(cv$lambda.min, 3), " (", n_sel, " of ", ncol(X),
+                           " variables kept) and lambda.1se = ", signif(cv$lambda.1se, 3)),
+         x = "Lambda (penalty, log scale)", y = "Standardised coefficient (beta)", colour = NULL) +
+    theme_light()
+  list(plot = p, cv = cv)                                            # return the plot and the CV fit
+}
+```
+
+```{r part2-age-num}
+# age as one number instead of year dummies
+f_paper_agen <- ~ theme_ml + size + age
+f_full_agen  <- ~ theme_ml + size + age + pieces + pieces_sq + minifigs + log_retail
+
+# two OLS fits on all sets, target prem15
+fits2_agen <- list(`Theme, size, age`                                     = lm(update(f_paper_agen, prem15 ~ .), data = sets),
+                   `Theme, size, age + pieces, minifigures, retail price` = lm(update(f_full_agen,  prem15 ~ .), data = sets))
+```
+
+```{r part2-age-num-table, echo = FALSE}
+kable(reg_table(fits2_agen), align = "lrr",
+      caption = paste0("OLS on all sets. Target: cumulative log premium over retail in Dec 2015 (prem15). Estimate (classical SE); *** p < 0.01, ** p < 0.05, * p < 0.1. ",
+                       "Reference levels: theme ", levels(sets$theme_ml)[1], ", size group ", levels(sets$size)[1]))
+kable(robust_check(fits2_agen, cont_vars), digits = 3,
+      caption = "Non-dummy variables: classical vs heteroskedasticity-robust (HC1) tests")
+```
+
+```{r part2-age-num-lasso, fig.height = 5}
+# LASSO paths for the two feature sets
+lp2_agen_paper <- lasso_path(sets, "prem15", f_paper_agen, "LASSO path: theme, size, age (number). Target: prem15")
+lp2_agen_full  <- lasso_path(sets, "prem15", f_full_agen,  "LASSO path: theme, size, age (number) + pieces, minifigures, retail price. Target: prem15")
+lp2_agen_paper$plot
+lp2_agen_full$plot
+```
+
+**How to read the age coefficient.** The target is a log, so a coefficient of 0.05 means about 5% more premium over retail for each extra year of age, with theme and size held fixed. It is one average slope: it assumes each extra year adds the same amount.
+
+## 2.2 Grouped cross-validation: unseen themes and unseen years
+
+Random folds hold out single sets, but a held-out set shares its theme and release year with many training sets. So the model only has to learn theme and year averages. A stricter test holds out *whole groups* (Roberts et al. 2017):
+
+- **Unseen themes.** Every set of a theme is in the same fold. A theme dummy cannot carry over to a theme the model has never seen, so the features here are size, release year, pieces, minifigures and retail price.
+- **Unseen years.** Every set of a release year is in the same fold. Year dummies cannot carry over either, so age enters as a number, which can extrapolate, together with theme, size, pieces, minifigures and retail price.
+
+Each grouped run is compared with random folds on the *same* features, so the difference shows the cost of the grouping alone.
+
+```{r part2-grouped, cache = TRUE}
+# features for the unseen-theme test: no theme dummies
+f_no_theme   <- ~ size + year_ml + pieces + pieces_sq + minifigs + log_retail
+rhs_no_theme <- c("size", "year_ml", "pieces", "minifigs", "log_retail")
+# features for the unseen-year test: age as a number instead of year dummies
+f_no_year    <- ~ theme_ml + size + age + pieces + pieces_sq + minifigs + log_retail
+rhs_no_year  <- c("theme_ml", "size", "age", "pieces", "minifigs", "log_retail")
+grp_models   <- c("Naive (mean)", "OLS", "LASSO", "Random forest", "XGBoost")
+
+# four runs: random and grouped folds for each question
+grp_runs <- list(
+  list(Question = "Unseen themes", Folds = "Random sets",  f = f_no_theme, rhs = rhs_no_theme, group = NULL),
+  list(Question = "Unseen themes", Folds = "Whole themes", f = f_no_theme, rhs = rhs_no_theme, group = "theme"),
+  list(Question = "Unseen years",  Folds = "Random sets",  f = f_no_year,  rhs = rhs_no_year,  group = NULL),
+  list(Question = "Unseen years",  Folds = "Whole years",  f = f_no_year,  rhs = rhs_no_year,  group = "year"))
+
+# run them and stack the scores
+res2_grp <- map_dfr(grp_runs, function(r)
+  score(cv_models(sets, "y15", r$f, r$rhs, group = r$group, models = grp_models)) %>%
+    mutate(Question = r$Question, Folds = r$Folds)) %>%
+  select(Question, Folds, Model, `OOS R2`, RMSE, `Rank corr.`)
+
+# OLS results side by side, used in the text
+grp_ols <- res2_grp %>% filter(Model == "OLS") %>% select(Question, Folds, `OOS R2`) %>%
+  pivot_wider(names_from = Folds, values_from = `OOS R2`)
+# best model in each grouped run
+grp_best <- res2_grp %>% filter(Model != "Naive (mean)", Folds %in% c("Whole themes", "Whole years")) %>%
+  group_by(Question) %>% slice_max(`OOS R2`, n = 1) %>% ungroup()
+```
+
+```{r part2-grouped-table, echo = FALSE}
+kable(res2_grp, digits = 3,
+      caption = "Target: annualised return since release to Dec 2015. Random folds vs whole themes or whole years held out, same features within each question")
+```
+
+**Answer.** Holding out whole themes, OLS reaches an out-of-sample R² of `r f3(grp_ols$"Whole themes"[grp_ols$Question == "Unseen themes"])` against `r f3(grp_ols$"Random sets"[grp_ols$Question == "Unseen themes"])` with random folds on the same features. Holding out whole release years, it reaches `r f3(grp_ols$"Whole years"[grp_ols$Question == "Unseen years"])` against `r f3(grp_ols$"Random sets"[grp_ols$Question == "Unseen years"])`. The best model on unseen themes is `r grp_best$Model[grp_best$Question == "Unseen themes"]` (`r f3(grp_best$"OOS R2"[grp_best$Question == "Unseen themes"])`) and on unseen years `r grp_best$Model[grp_best$Question == "Unseen years"]` (`r f3(grp_best$"OOS R2"[grp_best$Question == "Unseen years"])`). `r if (min(grp_best$"OOS R2") > 0) "Some explanatory power survives even when the model has never seen the theme or the year, so the paper's result is not only an artefact of in-sample fitting." else "On at least one grouped test the models do no better than the naive mean, so part of the paper's explanatory power comes from learning group averages that do not carry over."` A new LEGO set usually belongs to an existing theme, so the unseen-theme test is stricter than most practical uses. `r if (diff(unlist(grp_ols[grp_ols$Question == "Unseen years", c("Whole years", "Random sets")])) > diff(unlist(grp_ols[grp_ols$Question == "Unseen themes", c("Whole themes", "Random sets")]))) "Release years carry over less well than themes. Two possible reasons, which we do not test: each release cohort meets its own market (collector demand, production runs and retirement timing at the time), and the target is the annualised return since release, so the release year also fixes the holding period and makes the year effect non-linear in age; an unseen year forces the model to extrapolate it." else ""`
+
+# 3. Experiment 2: forward-return predictability, 2015 to 2019
+
+```{r part3, cache = TRUE}
+oof_f_char <- cv_models(sets, "y_fwd", f_full, rhs_full)                  # characteristics only
+oof_f_mom  <- cv_models(sets, "y_fwd", f_mom,  rhs_mom)                   # plus the 2015 price, premium and return
+oof_f_y15  <- cv_models(sets, "y_fwd", ~ y15, "y15", models = c("OLS"))   # the 2015 return alone
+
+# one results table
+res3 <- bind_rows(score(oof_f_char) %>% mutate(Features = "Characteristics"),
+                  score(oof_f_mom)  %>% mutate(Features = "Characteristics + 2015 price, premium, return"),
+                  score(oof_f_y15)  %>% mutate(Features = "2015 return only")) %>%
+  select(Features, everything())
+```
+
+```{r part3-table, echo = FALSE}
+kable(res3, digits = 3, caption = "Held-out sets. Target: forward return December 2015 to April 2019 (log, p.a.)")
+```
+
+```{r part3-plot, fig.cap = "Past winners became losers: return since release to 2015 against the forward return 2015 to 2019"}
+sets %>% filter(!is.na(y_fwd)) %>%                                   # sets with a forward return
+  ggplot(aes(x = y15, y = y_fwd)) +
+  geom_point(alpha = 0.25, size = 0.8) +                             # one point per set
+  geom_smooth(method = "lm", colour = "#0570EA") +                   # straight-line fit
+  geom_hline(yintercept = 0, linetype = 2) +                         # zero return
+  labs(x = "Annualised return since release to Dec 2015 (y15)", y = "Forward return Dec 2015 to Apr 2019 (p.a.)") +
+  theme_light()
+```
+
+**Answer.** The LEGO premium did not continue: between December 2015 and April 2019 the median set's price changed by `r pct(head_median)` and an equal-weighted portfolio by `r pct(head_mean)` (simple returns, Section 0), and `r pct(1 - head_up)` of sets fell in price. Characteristics still carry some information about the forward return (out-of-sample R² up to `r f3(max(res3$"OOS R2"[res3$Features == "Characteristics"]))`). Adding the December 2015 price level, premium and return raises it to `r f3(max(res3$"OOS R2"[grepl("2015 price", res3$Features)]))`; on its own, the return already earned has a slope of `r f3(coef(lm(y_fwd ~ y15, data = sets))["y15"])` on the forward return. The correlation between the 2015 return and the 2015-2019 return is `r f3(cor(sets$y15, sets$y_fwd, use = "complete.obs"))`: the sets that had appreciated most did worst afterwards. With these features the best model reaches an out-of-sample R² of `r f3(max(res3$"OOS R2"))`. Part of this is mechanical: a too-high December 2015 price quote raises the 2015 return and lowers the measured forward return at the same time, so the next section repeats the test on a window that does not contain the 2015 price.
+
+## 3.1 Age as a number, target: forward return (y_fwd)
+
+Same approach as Section 2.1 for the forward return December 2015 to April 2019. Age enters as one number in place of the year dummies. The target stays `y_fwd`: unlike `y15` it is not divided by age, because every set is held over the same window (about 3.4 years). Helpers `reg_table()`, `robust_check()` and `lasso_path()` come from Section 2.1.
+
+```{r part3-age-num}
+# feature sets with age as a number
+f_char_agen <- ~ theme_ml + size + age + pieces + pieces_sq + minifigs + log_retail
+f_mom_agen  <- ~ theme_ml + size + age + pieces + pieces_sq + minifigs + log_retail + prem15 + log_p15 + y15
+
+# three OLS fits on all sets, target y_fwd
+fits3_agen <- list(`Characteristics (age as a number)`               = lm(update(f_char_agen, y_fwd ~ .), data = sets),
+                   `Characteristics + 2015 price, premium, return` = lm(update(f_mom_agen,  y_fwd ~ .), data = sets),
+                   `2015 return only`                              = lm(y_fwd ~ y15, data = sets))
+```
+
+```{r part3-age-num-table, echo = FALSE}
+kable(reg_table(fits3_agen), align = "lrrr",
+      caption = paste0("OLS on all sets with a forward price. Target: forward return Dec 2015 to Apr 2019 (y_fwd, log, p.a.). Estimate (classical SE); *** p < 0.01, ** p < 0.05, * p < 0.1. ",
+                       "Reference levels: theme ", levels(sets$theme_ml)[1], ", size group ", levels(sets$size)[1]))
+kable(robust_check(fits3_agen, cont_vars), digits = 3,
+      caption = "Non-dummy variables: classical vs heteroskedasticity-robust (HC1) tests")
+```
+
+**Note.** In the second model `log_p15` equals `prem15 + log_retail` exactly, so OLS cannot separate the three and drops one ("aliased"). LASSO has no such problem: the penalty picks one of them. The age coefficient is the change in the forward return per extra year of age, with everything else held fixed.
+
+```{r part3-age-num-lasso, fig.height = 5}
+# LASSO paths for the two feature sets
+lp3_agen_char <- lasso_path(sets, "y_fwd", f_char_agen, "LASSO path: characteristics, age as a number. Target: y_fwd")
+lp3_agen_mom  <- lasso_path(sets, "y_fwd", f_mom_agen,  "LASSO path: characteristics + 2015 price, premium, return. Target: y_fwd")
+lp3_agen_char$plot
+lp3_agen_mom$plot
+```
+
+# 4. Experiment 2, clean window: return 2018 to 2019 with 2015 information
+
+```{r part4, cache = TRUE}
+oof_c_char <- cv_models(sets, "y_fwd2", f_full, rhs_full)   # same features, target Jan 2018 to Apr 2019
+oof_c_mom  <- cv_models(sets, "y_fwd2", f_mom,  rhs_mom)
+
+# one results table
+res4 <- bind_rows(score(oof_c_char) %>% mutate(Features = "Characteristics"),
+                  score(oof_c_mom)  %>% mutate(Features = "Characteristics + 2015 price, premium, return")) %>%
+  select(Features, everything())
+best4 <- res4 %>% filter(Model != "Naive (mean)") %>% slice_min(RMSE, n = 1)   # lowest error in this window
+```
+
+```{r part4-table, echo = FALSE}
+kable(res4, digits = 3, caption = "Held-out sets. Target: forward return January 2018 to April 2019, features as of December 2015")
+```
+
+**Answer.** The reversal is still there in the clean window. Predicting the January 2018 to April 2019 return with December 2015 information only, the rank correlation is `r f3(max(res4$"Rank corr."[grepl("2015 price", res4$Features)]))` with the price-history features against `r f3(max(res4$"Rank corr."[res4$Features == "Characteristics"]))` with characteristics alone, and the best model, **`r best4$Model`**, reaches an out-of-sample R² of `r f3(best4$"OOS R2")`. The best out-of-sample R² here is `r f3(max(res4$"OOS R2"))` against `r f3(max(res3$"OOS R2"))` in Section 3`r if (max(res4$"OOS R2") < max(res3$"OOS R2")) ", consistent with part of the 2015-2019 result being the mechanical effect of the 2015 price" else ""`. In this window the 2015 price enters only the predictors, not the target, so the direct mechanical channel is gone. The channel is *weakened*, not closed: price-guide quotes can go stale, so a set with a too-high quote in December 2015 may still carry part of it in January 2018, the start of the target. The result therefore *supports* mean reversion in LEGO prices but does not prove it: other explanations remain, such as fashions in particular themes, re-releases of popular sets by LEGO, or the composition of the authors' sample. Across models the differences are small: the penalised regressions, OLS and the random forest are within `r f3(max(res4$RMSE[res4$Model != "Naive (mean)"]) - min(res4$RMSE[res4$Model != "Naive (mean)"]))` of each other in RMSE.
+
+# 5. Investor view: sorting sets on a forecast made in advance
+
+Sections 3 and 4 fit and score their models on the same window, so an investor could not have built them in advance, and picking the best model by its score on the same data would bias the result upwards. Here we use **one model fixed in advance**: OLS with all features, fitted on an earlier window and applied unchanged to a later one. The data hold no prices between release and December 2015 other than the retail price, so both windows come from the monthly 2018-2019 prices:
+
+| | Information date | Return measured |
+|:--|:--|:--|
+| Fitting window | January 2018 | February to August 2018 |
+| Sorting window | August 2018 | September 2018 to April 2019 |
+
+In both windows the return starts one month after the information date. An investor in August 2018 knew everything the model uses. Features: theme, size, age at the information date, pieces, minifigures, retail price, the premium over retail at the information date (`prem_now`) and the annualised return since release at that date (`y_since`).
+
+```{r part5-sorts}
+# the two windows
+WIN_FIT  <- c(info = "2018-01-01", start = "2018-02-01", end = "2018-08-01")
+WIN_SORT <- c(info = "2018-08-01", start = "2018-09-01", end = "2019-04-01")
+
+# one row per set with the features at the information date and the return after it
+make_window <- function(w){
+  sets %>% select(id, theme, theme_ml, size, year, pieces, pieces_sq, minifigs, log_retail, p_retail) %>%
+    inner_join(p_at(w[["info"]],  "p_info"),  by = "id") %>%          # price at the information date
+    inner_join(p_at(w[["start"]], "p_start"), by = "id") %>%          # price when the return starts
+    inner_join(p_at(w[["end"]],   "p_stop"),  by = "id") %>%          # price when the return ends
+    mutate(age_now  = year(as.Date(w[["info"]])) + (month(as.Date(w[["info"]])) - 1) / 12 - year,   # age in years
+           prem_now = log(p_info / p_retail),                         # log premium over retail at that date
+           y_since  = prem_now / age_now,                             # annualised return since release
+           h        = as.numeric(as.Date(w[["end"]]) - as.Date(w[["start"]])) / 365.25,   # length of the return window
+           y        = log(p_stop / p_start) / h,                      # annualised log return
+           R_hold   = p_stop / p_start - 1)                           # simple return over the window
+}
+win_fit  <- make_window(WIN_FIT)
+win_sort <- make_window(WIN_SORT)
+
+# fit OLS on the first window and predict the second; both windows share one dummy matrix
+f_inv <- ~ theme_ml + size + age_now + pieces + pieces_sq + minifigs + log_retail + prem_now + y_since
+both  <- bind_rows(win_fit %>% mutate(part = "fit"), win_sort %>% mutate(part = "sort"))
+X_inv <- model.matrix(f_inv, data = both)[, -1, drop = FALSE]        # dummies without the intercept
+is_fit <- both$part == "fit"
+b_inv <- coef(lm.fit(cbind(1, X_inv[is_fit, ]), both$y[is_fit]))     # OLS on the first window
+b_inv[is.na(b_inv)] <- 0                                             # collinear columns get weight 0
+sort5 <- win_sort %>%
+  mutate(pred = as.numeric(cbind(1, X_inv[!is_fit, ]) %*% b_inv),    # forecast for the second window
+         Quintile = ntile(pred, 5))                                  # 1 = lowest forecast, 5 = highest
+
+# wild cluster bootstrap p-value for the slope of y on x, with the null imposed
+# weights "rademacher" (+1 or -1) or "webb" (six values, better with few clusters, Webb 2023)
+wild_cluster_p <- function(y, x, cluster, B = 999, seed = SEED, weights = c("rademacher", "webb")){
+  weights <- match.arg(weights)
+  w_pts <- if (weights == "rademacher") c(-1, 1) else c(-sqrt(1.5), -1, -sqrt(0.5), sqrt(0.5), 1, sqrt(1.5))
+  t_of <- function(yy){ f <- lm(yy ~ x); coef(f)[2] / sqrt(vcovCL(f, cluster = cluster)[2, 2]) }   # clustered t
+  t_obs <- t_of(y)                                                   # t in the data
+  f0 <- fitted(lm(y ~ 1)); e0 <- y - f0                              # fit and residuals under the null
+  g <- as.integer(factor(cluster)); G <- max(g)                      # cluster index and number of clusters
+  set.seed(seed)
+  t_b <- replicate(B, t_of(f0 + e0 * sample(w_pts, G, replace = TRUE)[g]))   # one weight per cluster in each draw
+  (1 + sum(abs(t_b) >= abs(t_obs))) / (B + 1)                        # never exactly 0
+}
+
+# average results per quintile
+sorts <- sort5 %>% group_by(Quintile) %>%
+  summarise(Sets = n(),
+            `Mean forecast (p.a.)` = mean(pred),
+            `Realised (p.a., log)` = mean(y),
+            `Realised over the window (simple)` = mean(R_hold),       # mean of each set's simple return
+            `Share positive` = mean(y > 0), .groups = "drop")
+spread        <- sorts$`Realised (p.a., log)`[5] - sorts$`Realised (p.a., log)`[1]               # top minus bottom, annualised log
+spread_simple <- sorts$`Realised over the window (simple)`[5] - sorts$`Realised over the window (simple)`[1]   # same in simple terms
+rank5 <- cor(sort5$pred, sort5$y, method = "spearman")              # rank correlation of forecast and outcome
+
+# test of top against bottom quintile, clustered by theme
+tb5 <- sort5 %>% filter(Quintile %in% c(1, 5)) %>% mutate(top = as.numeric(Quintile == 5))
+fit_tb <- lm(y ~ top, data = tb5)                                    # slope on top = the spread
+t_cluster <- coef(fit_tb)["top"] / sqrt(vcovCL(fit_tb, cluster = tb5$theme)["top", "top"])
+p_wild    <- wild_cluster_p(tb5$y, tb5$top, tb5$theme)               # +1/-1 weights
+p_webb    <- wild_cluster_p(tb5$y, tb5$top, tb5$theme, weights = "webb")   # six-point weights
+n_themes5 <- n_distinct(tb5$theme)                                   # clusters in the test
+
+# buying the top quintile, against the selling fee.
+# the break-even fee needs no fee data; the net return uses today's eBay fees as an example,
+# which may differ from the fees in 2018-2019
+FEE_EBAY  <- 0.136   # eBay final value fee, most categories (eBay Seller Center, October 2026)
+FEE_FIXED <- 0.40    # eBay fee per order in USD, orders over $10 (same source)
+q5 <- sort5 %>% filter(Quintile == 5)                                # top quintile
+q5_raw       <- mean(q5$R_hold)                                      # its return before costs
+q5_excess    <- q5_raw - mean(sort5$R_hold)                          # minus the average set
+q5_breakeven <- q5_raw / (1 + q5_raw)                                # fee that uses up the gain
+q5_net       <- mean((1 + q5$R_hold) * (1 - FEE_EBAY) - FEE_FIXED / q5$p_start - 1)   # after the fee share and the order fee
+```
+
+```{r part5-sorts-table, echo = FALSE}
+kable(sorts, digits = 3, caption = "Quintiles of the OLS forecast fixed in advance. Sorting window: Sep 2018 to Apr 2019")
+```
+
+**Answer.** Sorted on a forecast an investor could have made in August 2018, the top quintile beat the bottom quintile by `r pct(spread_simple)` over the `r round(12 * mean(win_sort$h))`-month window (simple returns; `r pct(sorts$"Realised over the window (simple)"[5])` against `r pct(sorts$"Realised over the window (simple)"[1])`), and the rank correlation between forecast and outcome is `r f3(rank5)`. The test uses `r n_themes5` themes as clusters: theme-clustered t = `r f2(t_cluster)`, wild cluster bootstrap p `r pfmt(p_wild)`, with Webb's six-point weights p `r pfmt(p_webb)`. The fitting window has no December and the sorting window includes Christmas 2018; this can shift the level of returns between windows, but the sort compares sets within the same window. The spread is not a strategy: LEGO sets cannot be sold short. The tradable leg is the top quintile, which earned `r pct(q5_raw)` per set (equal-weighted), `r pct(q5_excess)` more than the average set. **Break-even:** a selling fee above `r pct(q5_breakeven)` of the sale price uses up that gain, whatever the fee schedule. As a scenario, today's eBay fees (`r 100 * FEE_EBAY`% of the sale plus $`r formatC(FEE_FIXED, format = "f", digits = 2)` per order; eBay Seller Center) would leave `r pct(q5_net)`, before shipping, the buyer's costs and storage. The 2018-2019 fees, when eBay and PayPal charged sellers separately, are not verified here. *In annualised log terms, used by the models, the spread is `r pct(spread)` a year.*
+
+# 6. Why a naive 2018 test gives 70% hit ratios
+
+A natural first test is to train on the 2015 cross-section and "predict" the 2018-2019 prices of the same sets with the same target definition, the return since release. It gives hit ratios near 70%. This is not forecasting.
+
+```{r persistence}
+# return since release measured at the last 2018-2019 price
+tp <- sets %>% filter(!is.na(y_fwd)) %>%
+  mutate(y_1819 = log(p_end / p_retail) /
+           (year(date_end) - year + (month(date_end) - 12) / 12))   # divided by the age at that date
+```
+
+```{r persistence-table, echo = FALSE}
+tibble(Check = c("Correlation: return since release in 2015 vs in 2019",
+                 "Median hit of the rule \"rank 2019 like 2015\" (no model)",
+                 "Median hit of the same rule against the forward return"),
+       Value = c(cor(tp$y15, tp$y_1819),
+                 mean((tp$y15 > median(tp$y15)) == (tp$y_1819 > median(tp$y_1819))),   # same side of the median
+                 mean((tp$y15 > median(tp$y15)) == (tp$y_fwd > median(tp$y_fwd))))) %>%
+  kable(digits = 3, caption = "Persistence, not prediction")
+```
+
+**Answer.** The return since release measured in 2019 contains the return since release measured in 2015 plus three more years, so the two are correlated `r f3(cor(tp$y15, tp$y_1819))`. A model that fits the 2015 cross-section therefore "predicts" the 2019 cross-section without any information about the future: ranking sets by their own 2015 return already gives a hit ratio of `r pct(mean((tp$y15 > median(tp$y15)) == (tp$y_1819 > median(tp$y_1819))))`, more than any model. Against the forward return the same rule scores `r pct(mean((tp$y15 > median(tp$y15)) == (tp$y_fwd > median(tp$y_fwd))))`, below 50%, which is the mean reversion of Sections 3 and 4 seen from the other side. The lesson is the one from the course: the test target must not share information with the training target, and the benchmark must be the simplest rule that uses the same information.
+
+# 7. Limitations
+
+**Answer.** What the design can and cannot show.
+
+- *Period.* All forward tests use December 2015 to April 2019. The forecast in Section 5 is made in advance, but both of its windows sit inside 2018-2019; the data hold no prices before 2015 to test an earlier window.
+- *Returns.* Returns before costs. Up to 2015 the average set earned `r pct(mean(sets$y15))` a year as a mean annualised log return (median `r pct(median(sets$y15))`); the paper's 11% may use another definition. Neither is a net investment return.
+- *Prices.* Monthly aggregates of eBay sales from BrickPicker's price guide, "approximate" and "several months old" by the source's own description (sheet "About the sample"). The 2018-2019 file matches the 2015 new-price level (Section 0.1), but its method is not documented.
+- *Stale quotes.* The clean window (Section 4) removes the direct mechanical link through the 2015 price but only weakens it: a stale 2015 quote can still be in the January 2018 price.
+- *Dependence.* Sets of one theme move together. Section 5 reports theme-clustered t-statistics with the `r n_themes5` themes in the top and bottom quintiles as clusters, and wild cluster bootstraps with Rademacher and Webb weights, which are more reliable with few clusters (Cameron, Gelbach and Miller 2008; Webb 2023). With essentially one or two time periods, the effective sample in time is small.
+- *Sample.* `r sum(is.na(sets$p_end))` sets have no 2018-2019 price and a few are dropped in 2015 (Section 0.1). These are probably the least traded, so the results lean towards liquid sets.
+- *Models.* Ridge, LASSO and elastic net choose their penalty by cross-validation inside each training fold; the tree, random forest and XGBoost use fixed settings from the course. The model comparison is indicative.
+
+# 8. Summary
+
+```{r summary-table, echo = FALSE}
+keep <- c("OLS", "LASSO", "Random forest", "XGBoost")   # models shown in the summary
+bind_rows(res2 %>% filter(Model %in% keep, !grepl("^Paper \\(", Features)) %>% mutate(Question = "1a. Unseen sets (random folds), return to 2015"),
+          res2_grp %>% filter(Model %in% keep, Folds == "Whole themes") %>% mutate(Question = "1b. Unseen themes, return to 2015"),
+          res2_grp %>% filter(Model %in% keep, Folds == "Whole years") %>% mutate(Question = "1c. Unseen release years, return to 2015"),
+          res3 %>% filter(Model %in% keep, grepl("2015 price", Features)) %>% mutate(Question = "2a. Forward return 2015 to 2019 (same window)"),
+          res4 %>% filter(Model %in% keep, grepl("2015 price", Features)) %>% mutate(Question = "2b. Clean window 2018 to 2019 (same window)")) %>%
+  select(Question, Model, `OOS R2`, `Rank corr.`) %>%
+  kable(digits = 3, caption = "Main results (held-out sets)")
+```
+
+**Answer.**
+
+1. **Replication.** Table 5 replicates; the largest gap to the paper's reported figures is `r f3(rep_maxdiff)`.
+2. **Generalisation across sets.** With random folds, OLS keeps an out-of-sample R² of `r f3(ols2_full$"OOS R2")`. Holding out whole themes gives `r f3(grp_ols$"Whole themes"[grp_ols$Question == "Unseen themes"])` and whole release years `r f3(grp_ols$"Whole years"[grp_ols$Question == "Unseen years"])`, so the strength of the claim depends on how "unseen" is defined.
+3. **After 2015.** From December 2015 to April 2019 the median set's price changed by `r pct(head_median)` and an equal-weighted portfolio by `r pct(head_mean)` (simple returns, before costs). The two price files describe the same sets in the same condition (Section 0.1), so the change is not a switch of source or condition.
+4. **Predictability through time.** Within one window, past winners did worse (Sections 3 and 4). A forecast made in advance (Section 5) reaches a rank correlation of `r f3(rank5)` and a top-minus-bottom spread of `r pct(spread_simple)` over seven months (wild cluster bootstrap p `r pfmt(p_wild)`).
+5. **As an investment.** Even the sets the forecast liked most gained only `r pct(q5_raw)` over seven months; a selling fee above `r pct(q5_breakeven)` uses that up. The ranking is a statistical finding, not a strategy.
+
+*Data:* Dobrynskaya and Kishilova, Mendeley Data v9hhs66vm3 ("DiB whole sample Dec 2015 prices", "DiB whole sample Jan 2018 - Apr 2019 prices"); data description in the sheet "About the sample". *Fees:* eBay Seller Center, https://www.ebay.com/sellercenter/selling/start-selling-on-ebay/seller-fees (accessed October 2026). *Methods:* Roberts et al. (2017), *Ecography* 40 (grouped cross-validation); Cameron, Gelbach and Miller (2008), *Review of Economics and Statistics* 90(3) (wild cluster bootstrap); Webb (2023), *Canadian Journal of Economics* (six-point weights); Getmansky, Lo and Makarov (2004), *JFE* (smoothed returns). *Code:* replication block from `LegoProject.R`; cross-validation by set and by group, forward targets, clean window, sorts on a forecast made in advance and the persistence check added. Models and metrics as in the course homeworks (Coqueret and Guida, Chapters 5 and 6).
