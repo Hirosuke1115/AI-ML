@@ -1,0 +1,1 @@
+"0","kable(final_table, digits = 6, caption = ""Regression: best random forest and best XGBoost (chosen by test MSE)"")"

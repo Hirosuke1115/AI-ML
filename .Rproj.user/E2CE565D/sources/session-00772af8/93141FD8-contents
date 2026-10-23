@@ -1,0 +1,662 @@
+---
+title: "LEGO as an investment: out-of-sample tests of the hedonic premium"
+author: "Hiro, Hendrik, Stefan"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: false
+    df_print: kable
+---
+
+```{r setup, include = FALSE}
+# chunk options used in the whole document
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,   # show code, hide messages and warnings
+                      fig.width = 8, fig.height = 4.5, fig.align = "center",   # default figure size and position
+                      # cached chunks are recomputed when this file or one of the data files changes
+                      cache.extra = tools::md5sum(c(knitr::current_input(),
+                                                    "DiB whole sample Dec 2015 prices.xlsx",
+                                                    "DiB whole sample Jan 2018 - Apr 2019 prices.xlsx")))
+```
+
+# 1. Introduction: research questions and hypotheses
+
+Dobrynskaya and Kishilova (2022, *LEGO: The Toy of Smart Investors*, RIBF) report that retired LEGO sets earned about 11% a year on the secondary market between 1987 and 2015, and that a hedonic regression on theme, size and release year explains about half of the variation across sets (R² = 0.47). A **hedonic model** explains a set's premium over its retail price by the set's characteristics: theme, size, age, pieces, minifigures and retail price. The regression is fitted and scored on the same sets, so it says which sets *did* appreciate, not which sets *will*. With the authors' own published data (Mendeley Data v9hhs66vm3) we ask three questions:
+
+| | Research question | Null hypothesis (H~0~) and alternative | Sections |
+|:--|:--|:--|:--|
+| **RQ1 Generalise** | Does the hedonic relation predict the return of sets, themes and release years the model has never seen? | **H1~0~.** Out-of-sample R² ≤ 0: the model predicts no better than the naive mean. *Alternative: R² > 0.* | 3.1 |
+| **RQ2 Model class** | Do other regressions, including non-linear models, capture the hedonic characteristics of LEGO? | **H2~0~.** Penalised (ridge, LASSO, elastic net) and non-linear models (tree, random forest, XGBoost) do not beat OLS out of sample on the same features. *Alternative: they beat OLS.* | 3.2 |
+| **RQ3 Persist** | Did the premium continue after 2015, and does 2015 information predict the forward return? | **H3~0~.** The December 2015 premium over retail has no effect on the forward return (coefficient = 0). *Alternative: a negative effect (mean reversion).* | 3.3 to 3.6 |
+
+RQ1 and RQ2 work on the 2015 cross-section. RQ3 works through time, on 2018-2019 prices the original study did not model. Each H~0~ is the no-effect case: rejecting it supports the alternative. H1~0~ and H2~0~ are judged on out-of-sample R², without a formal significance test; H3~0~ is a t-test with robust (HC1) standard errors.
+
+# 2. Data and methodology
+
+## 2.1 Data and sample
+
+```{r data}
+library(tidyverse)      # data handling and plots
+library(lubridate)      # year() and month()
+library(readxl)         # read the Excel files
+library(glmnet)         # ridge, LASSO and elastic net
+library(rpart)          # regression tree
+library(randomForest)   # random forest
+library(sandwich)       # robust and clustered standard errors
+library(knitr)          # kable() tables
+has_xgb <- requireNamespace("xgboost", quietly = TRUE)   # TRUE if xgboost is installed
+if (has_xgb) library(xgboost)                            # load it only if it is there
+
+data_dir <- "."   # the two data files are in the same folder as this file
+
+# read the 2015 file: one row per set
+raw_2015 <- read_excel(file.path(data_dir, "DiB whole sample Dec 2015 prices.xlsx"),
+                       sheet = "DATA", na = c("", "NA", "ND"))   # "ND" means no data
+# short column names
+names(raw_2015) <- c("id", "theme", "name", "year", "pieces", "minifigs",
+                     "p_new_2015", "p_used_2015", "p_retail", "age", "size")
+
+# count the sets that fail each filter below (shown in Section 2.2)
+drop_counts <- raw_2015 %>%
+  mutate(across(c(minifigs, p_new_2015, p_used_2015), ~ suppressWarnings(as.numeric(.x)))) %>%   # text to numbers
+  summarise(`In the 2015 file` = n(),                                                 # all rows
+            `No retail price` = sum(is.na(p_retail) | p_retail <= 0),                 # retail price missing or 0
+            `New price 0 ("no sale") or missing` = sum(is.na(p_new_2015) | p_new_2015 <= 0),
+            `Minifigures missing` = sum(is.na(minifigs)),
+            `Released in 2015` = sum(year >= 2015, na.rm = TRUE))                     # would give a zero holding period
+
+# build the 2015 sample
+sets <- raw_2015 %>%
+  mutate(across(c(minifigs, p_new_2015, p_used_2015), as.numeric),   # text to numbers
+         id = as.character(id),                                      # id as text, to join with the 2018 file
+         theme = relevel(factor(theme), ref = "Miscellaneous"),       # same reference theme as the original study
+         size = factor(size, levels = 1:4),                          # size group: 1 = biggest, 4 = smallest
+         year_f = factor(year),                                      # release year as dummies
+         log_retail = log(p_retail)) %>%                             # log retail price
+  filter(p_new_2015 > 0, p_retail > 0, !is.na(minifigs),             # a price of 0 means "no sale"
+         year < 2015) %>%                                            # y15 below divides by 2015 - year
+  droplevels() %>%                                                   # remove empty factor levels
+  mutate(y15 = log(p_new_2015 / p_retail) / (2015 - year),           # annual return since release (log, p.a.)
+         prem15 = log(p_new_2015 / p_retail),                        # cumulative return over retail (the premium, log)
+         log_p15 = log(p_new_2015))                                  # log price in Dec 2015
+
+# read the monthly prices, January 2018 to April 2019
+raw_1819 <- read_excel(file.path(data_dir, "DiB whole sample Jan 2018 - Apr 2019 prices.xlsx"),
+                       skip = 1, na = c("", "NA", "ND"))             # row 1 is a title
+month_cols <- names(raw_1819)[-(1:6)]                                # month headers are Excel date numbers
+names(raw_1819)[-(1:6)] <- as.character(as.Date(as.numeric(month_cols), origin = "1899-12-30"))   # turn them into dates
+prices_1819 <- raw_1819 %>%
+  mutate(id = as.character(id)) %>%                                  # id as text
+  select(id, matches("^20")) %>%                                     # keep id and the 16 month columns
+  pivot_longer(-id, names_to = "date", values_to = "p") %>%          # one row per set and month
+  mutate(date = as.Date(date), p = as.numeric(p)) %>%                # date and price as proper types
+  filter(!is.na(p), p > 0)                                           # keep months with a price
+
+# last observed price of each set (April 2019 for almost all sets)
+p_end <- prices_1819 %>%
+  group_by(id) %>%
+  slice_max(date, n = 1, with_ties = FALSE) %>%                      # latest month per set
+  ungroup() %>%
+  transmute(id, date_end = date, p_end = p)
+# price in January 2018
+p_jan18 <- prices_1819 %>% filter(date == as.Date("2018-01-01")) %>% transmute(id, p_jan18 = p)
+
+# forward returns after 2015
+sets <- sets %>%
+  left_join(p_end, by = "id") %>%                                    # add the last price
+  left_join(p_jan18, by = "id") %>%                                  # add the January 2018 price
+  mutate(h  = as.numeric(date_end - as.Date("2015-12-01")) / 365.25,   # years from Dec 2015 to the last price
+         h2 = as.numeric(date_end - as.Date("2018-01-01")) / 365.25,   # years from Jan 2018 to the last price
+         y_fwd  = log(p_end / p_new_2015) / h,                         # forward return 2015-19 (log, p.a.)
+         y_fwd2 = ifelse(h2 > 0.5, log(p_end / p_jan18) / h2, NA))     # forward return 2018-19, clean window (log, p.a.)
+
+# helper: price of each set in one month, as a column with the given name
+p_at <- function(d, name) prices_1819 %>% filter(date == as.Date(d)) %>% transmute(id, !!name := p)
+sets <- sets %>% left_join(p_at("2019-04-01", "p_apr19"), by = "id")   # add the April 2019 price
+
+# for the machine-learning models: pool rare themes and early years.
+# the rule uses only the number of sets per level, not the returns
+sets <- sets %>%
+  mutate(theme_ml = fct_lump_min(theme, min = 15, other_level = "Other"),           # themes with < 15 sets become "Other"
+         year_ml  = factor(ifelse(year < 1995, "pre-1995", as.character(year))),   # years before 1995 in one group
+         pieces_sq = pieces^2,                                                       # pieces squared
+         age = as.numeric(age))                                                      # age in years, from the data file
+
+# small helpers for numbers in the text
+f3  <- function(x) formatC(x, format = "f", digits = 3)                       # 3 decimals
+f2  <- function(x) formatC(x, format = "f", digits = 2)                       # 2 decimals
+pct <- function(x) paste0(formatC(100 * x, format = "f", digits = 1), "%")    # percent with 1 decimal
+num <- function(x) format(x, big.mark = ",")                                  # thousands separator
+```
+
+```{r headline}
+# simple return of each set from Dec 2015 to Apr 2019
+head_fwd <- sets %>% filter(!is.na(p_apr19)) %>% transmute(R = p_apr19 / p_new_2015 - 1)
+head_median <- median(head_fwd$R)   # the typical set
+head_mean   <- mean(head_fwd$R)     # equal-weighted portfolio of all sets
+head_up     <- mean(head_fwd$R > 0) # share of sets that gained
+```
+
+```{r data-table, echo = FALSE}
+# the four return measures used in the report
+vars <- list(`Annual return since release, to Dec 2015 (log, p.a.)` = sets$y15,
+             `Cumulative return over retail, Dec 2015 (premium, log)` = sets$prem15,
+             `Forward return 2015-19, Dec 2015 to Apr 2019 (log, p.a.)` = sets$y_fwd,
+             `Forward return 2018-19, Jan 2018 to Apr 2019 (log, p.a.)` = sets$y_fwd2)
+# one row of summary statistics per measure
+tibble(Measure = names(vars),
+       Sets = map_int(vars, ~ sum(!is.na(.x))),               # number of sets with a value
+       Mean = map_dbl(vars, mean, na.rm = TRUE),
+       Median = map_dbl(vars, median, na.rm = TRUE),
+       SD = map_dbl(vars, sd, na.rm = TRUE),
+       `Share > 0` = map_dbl(vars, ~ mean(.x > 0, na.rm = TRUE))) %>%   # share of positive values
+  kable(digits = 3, caption = paste0("The sample: ", num(nrow(sets)), " retired sets with a retail price and a December 2015 secondary-market price"))
+```
+
+**Result.** The sample holds `r num(nrow(sets))` retired sets released between `r min(sets$year)` and `r max(sets$year)`. Up to December 2015 the median set earned `r pct(median(sets$y15))` a year (mean `r pct(mean(sets$y15))`, log terms), close to the 11% reported by Dobrynskaya and Kishilova, and `r pct(mean(sets$y15 > 0))` of sets traded above their retail price. After 2015 the picture changes. From December 2015 to April 2019 (40 months) the median set's price changed by `r pct(head_median)` and an equal-weighted portfolio of all sets by `r pct(head_mean)`, in simple returns before costs; `r pct(1 - head_up)` of sets fell in price. The models use annualised log returns, whose mean (`r pct(mean(sets$y_fwd, na.rm = TRUE))` a year) lies below the log of the average return.
+
+## 2.2 Data source, comparability and dropped sets
+
+**Source.** The sheet "About the sample" in the 2015 file describes BrickPicker's price guide: eBay sold auctions, bought via Terapeak, "aggregate[d] into our monthly Price Guide"; values "are approximate ones and are several months old". The prices are therefore monthly aggregates of realised eBay sales, not single trades or asking prices. The 2018-2019 file does not name its source.
+
+**Are the two files comparable?** If the 2018-2019 file used another source or another condition (for example used instead of new sets), every forward return would shift by the same amount and look like a crash. We check this directly.
+
+```{r comparability}
+# sets that are in both files, with theme and year as written in the 2018 file
+cmp <- sets %>%
+  filter(!is.na(p_jan18)) %>%                                        # sets with a January 2018 price
+  inner_join(raw_1819 %>% transmute(id = as.character(id), theme_1819 = theme, year_1819 = `year of release`),
+             by = "id")
+# checks: same sets, and new or used condition
+cmp_stats <- tibble(
+  Check = c("Sets in both files", "Same theme in both files", "Same release year in both files",
+            "Median log change, Dec 2015 new price to Jan 2018", "Median log change, Dec 2015 used price to Jan 2018",
+            "Correlation of log prices, Dec 2015 new vs Jan 2018"),
+  Value = c(nrow(cmp),
+            mean(cmp$theme_1819 == as.character(cmp$theme)),                 # share with the same theme
+            mean(cmp$year_1819 == cmp$year),                                 # share with the same year
+            median(log(cmp$p_jan18 / cmp$p_new_2015)),                       # near 0 if 2018 holds new prices
+            median(log(cmp$p_jan18 / cmp$p_used_2015), na.rm = TRUE),        # near 0 if 2018 holds used prices
+            cor(log(cmp$p_jan18), log(cmp$p_new_2015))))
+```
+
+```{r comparability-table, echo = FALSE}
+# table of the checks
+kable(cmp_stats, digits = 3, caption = "Do the 2015 and 2018-2019 files describe the same sets in the same condition?")
+# table of dropped sets: the filter counts, then the sets without later prices
+kable(drop_counts %>% pivot_longer(everything(), names_to = "Reason", values_to = "Sets") %>%
+        bind_rows(tibble(Reason = c("Kept in the 2015 sample", "Of these, no Jan 2018 price", "Of these, no 2018-2019 price at all"),
+                         Sets = c(nrow(sets), sum(is.na(sets$p_jan18)), sum(is.na(sets$p_end))))),
+      caption = "Why sets leave the sample (a set can fail several checks)")
+```
+
+**Result.** The files describe the same `r num(nrow(cmp))` sets: theme and release year agree for `r pct(cmp_stats$Value[2])` and `r pct(cmp_stats$Value[3])` of them. Prices line up with the 2015 *new* price (median log change `r f3(cmp_stats$Value[4])`) and not with the *used* price (`r f3(cmp_stats$Value[5])`), and log prices correlate `r f2(cmp_stats$Value[6])`, so the 2018 file holds new-condition prices of the same sets. The check cannot detect a change of method worth a few percent (see Section 4). Few sets are dropped, but those without prices are probably the least traded, so the sample tilts slightly towards liquid sets.
+
+## 2.3 Return measures
+
+| Measure | Code | Definition (log) | Window | Used for |
+|:--|:--|:--|:--|:--|
+| Annual return since release | `y15` | ln(P Dec 2015 / P retail) / (2015 - release year) | Release to Dec 2015, per year | H1, H2 target; H3 feature |
+| Cumulative return over retail (premium) | `prem15` | ln(P Dec 2015 / P retail) | Release to Dec 2015, total | Hedonic baseline target; H3 feature |
+| Forward return 2015-19 | `y_fwd` | ln(P Apr 2019 / P Dec 2015) / 3.33 years | Dec 2015 to Apr 2019, per year | H2, H3 target |
+| Forward return 2018-19 | `y_fwd2` | ln(P Apr 2019 / P Jan 2018) / 1.25 years | Jan 2018 to Apr 2019, per year | H2, H3 target, clean window |
+
+The return earned before 2015 is kept apart from the return earned after it, so no test scores a model on the price it was trained on. In the clean window the December 2015 price enters only the features, not the target.
+
+## 2.4 Test design
+
+| Test | Fit, then score | Features | Target | Shortcut it removes |
+|:--|:--|:--|:--|:--|
+| 0 Baseline | All sets, in sample | Theme, size, release-year dummies | Cumulative return over retail | Coding errors (Section 2.5) |
+| 1 Unseen sets (H1, H2) | 5-fold CV: random sets; whole themes; whole years | + pieces, minifigures, retail price | Annual return since release | Scoring on the fitted sets |
+| 2 Forward return (H2, H3) | 5-fold CV by set | Characteristics, then + Dec 2015 price history | Forward return 2015-19 | Hindsight about returns after 2015 |
+| 3 Clean window (H2, H3) | 5-fold CV by set | Same, as of Dec 2015 | Forward return 2018-19 | Dec 2015 price in both feature and target: a quote error fakes a reversal |
+
+The *2015 price history* is the December 2015 price, the cumulative return over retail and the annual return since release. Eight models compete on the same folds: the naive mean and OLS (linear), ridge, LASSO and elastic net (penalised, penalty chosen by cross-validation inside each training fold), and a regression tree, a random forest and XGBoost (non-linear, fixed settings). Scores: out-of-sample R² (above 0 beats the mean), RMSE, rank correlation, median hit and sign hit ratios.
+
+```{r cv-helpers}
+# feature sets. Dummies are built once on all sets, so every fold has the same columns
+f_base  <- ~ theme_ml + size + year_ml                                       # baseline hedonic variables
+f_full  <- ~ theme_ml + size + year_ml + pieces + pieces_sq + minifigs + log_retail   # plus set characteristics
+f_mom   <- ~ theme_ml + size + year_ml + pieces + pieces_sq + minifigs + log_retail + prem15 + log_p15 + y15   # plus 2015 price history
+rhs_full <- c("theme_ml", "size", "year_ml", "pieces", "minifigs", "log_retail")   # same features for the tree models
+rhs_mom  <- c(rhs_full, "prem15", "log_p15", "y15")
+
+# fit one model on the training rows and predict the test rows
+fit_predict <- function(model, X_tr, y_tr, X_te, df_tr, df_te, rhs, seed = 42){
+  set.seed(seed)                                                       # same seed for every model
+  switch(model,
+    "Naive (mean)"  = rep(mean(y_tr), nrow(X_te)),                     # predict the training mean for every set
+    "OLS"           = { b <- coef(lm.fit(cbind(1, X_tr), y_tr))        # least squares with an intercept
+                        b[is.na(b)] <- 0                               # collinear columns get weight 0
+                        as.numeric(cbind(1, X_te) %*% b) },            # predictions for the test rows
+    "Ridge"         = as.numeric(predict(cv.glmnet(X_tr, y_tr, alpha = 0),   X_te, s = "lambda.min")),   # penalty chosen by CV
+    "LASSO"         = as.numeric(predict(cv.glmnet(X_tr, y_tr, alpha = 1),   X_te, s = "lambda.min")),
+    "Elastic net"   = as.numeric(predict(cv.glmnet(X_tr, y_tr, alpha = 0.5), X_te, s = "lambda.min")),
+    "Tree"          = predict(rpart(reformulate(rhs, "y"), data = df_tr,
+                                    minbucket = 30, cp = 0.001, maxdepth = 4, xval = 0), df_te),
+    "Random forest" = predict(randomForest(reformulate(rhs, "y"), data = df_tr,
+                                           ntree = 300, mtry = max(2, floor(length(rhs) / 3)),   # 300 trees, 1/3 of features per split
+                                           nodesize = 10, sampsize = floor(0.7 * nrow(df_tr)), replace = FALSE), df_te),
+    "XGBoost"       = { if (!has_xgb) return(rep(NA_real_, nrow(X_te)))   # skip if xgboost is not installed
+                        fit <- xgb.train(params = list(objective = "reg:squarederror", eta = 0.05, max_depth = 3,
+                                                       subsample = 0.8, colsample_bytree = 0.8, lambda = 1, nthread = 2),
+                                         data = xgb.DMatrix(X_tr, label = y_tr), nrounds = 300, verbose = 0)
+                        predict(fit, X_te) })
+}
+
+# out-of-fold predictions for one target and one feature set.
+# group = NULL gives random folds by set; group = "theme" or "year" keeps each group in one fold
+cv_models <- function(df, target, formula_x, rhs, k = 5, seed = 42, group = NULL,
+                      models = c("Naive (mean)", "OLS", "Ridge", "LASSO", "Elastic net", "Tree", "Random forest", "XGBoost")){
+  df <- df %>%
+    filter(!is.na(.data[[target]]), if_all(all.vars(formula_x), ~ !is.na(.x))) %>%   # rows with no missing values
+    mutate(y = .data[[target]])                                                      # target column called y
+  X <- model.matrix(formula_x, data = df)[, -1, drop = FALSE]        # dummy matrix without the intercept
+  set.seed(seed)
+  if (is.null(group)) {
+    fold <- sample(rep(1:k, length.out = nrow(df)))                  # each set gets a random fold
+  } else {
+    g <- unique(df[[group]])                                         # list of groups
+    fold <- sample(rep(1:k, length.out = length(g)))[match(df[[group]], g)]   # each group gets a random fold
+  }
+  lapply(models, function(m){
+    pred <- rep(NA_real_, nrow(df))                                  # empty vector for the predictions
+    for (f in 1:k) {
+      tr <- fold != f                                                # training rows: all other folds
+      pred[!tr] <- fit_predict(m, X[tr, , drop = FALSE], df$y[tr],   # fit on them and predict fold f
+                               X[!tr, , drop = FALSE], df[tr, ], df[!tr, ], rhs, seed = seed + f)
+    }
+    tibble(Model = m, id = df$id, y = df$y, pred = pred)             # one row per set
+  }) %>%
+    bind_rows() %>%                                                  # all models in one table
+    filter(!is.na(pred))                                             # drops XGBoost if it is not installed
+}
+
+# scores of the out-of-fold predictions, one row per model
+score <- function(oof){
+  oof %>% group_by(Model) %>%
+    summarise(`OOS R2`     = 1 - mean((y - pred)^2) / mean((y - mean(y))^2),   # out-of-sample R squared
+              RMSE         = sqrt(mean((y - pred)^2)),
+              `Rank corr.` = if (sd(pred) == 0) NA else cor(pred, y, method = "spearman"),
+              `Median hit` = if (sd(pred) == 0) NA else mean((pred > median(pred)) == (y > median(y))),   # same side of the median
+              `Sign hit`   = mean(pred * y > 0),                                # same sign as the true value
+              `Share y > 0` = mean(y > 0),                                      # compare the sign hit with this
+              .groups = "drop") %>%
+    arrange(RMSE)                                                               # best model first
+}
+```
+
+## 2.5 Baseline: the hedonic regression reproduces the published estimates
+
+```{r replication}
+# the published hedonic regression: cumulative return over retail on theme, size and year dummies
+fit_base <- lm(log(p_new_2015 / p_retail) ~ theme + size + year_f, data = sets)
+```
+
+```{r replication-table, echo = FALSE}
+# our estimates next to the published ones (Dobrynskaya and Kishilova 2022, Table 5)
+rep_tab <- tibble(Coefficient = c("Batman theme", "Discovery theme", "Size group 2 (vs 1)", "R squared"),
+                  `Our estimate` = c(coef(fit_base)[c("themeBatman", "themeDiscovery", "size2")], summary(fit_base)$r.squared),
+                  `Published` = c(0.4484, 0.6124, -0.2438, 0.4695)) %>%
+  mutate(Difference = `Our estimate` - `Published`)
+rep_maxdiff <- max(abs(rep_tab$Difference))     # largest gap, used in the text
+rep_npar    <- sum(!is.na(coef(fit_base)))       # number of estimated parameters
+kable(rep_tab, digits = 4, caption = "Baseline hedonic regression: our estimates vs the published ones")
+```
+
+**Result.** Our estimates match the published ones: the largest difference is `r f3(rep_maxdiff)` and the R² is `r f3(summary(fit_base)$r.squared)` against 0.470. Small differences can come from the sets with missing values that we drop. All later differences therefore come from the test design, not from the data. Note what the R² means: the regression has `r rep_npar` parameters for `r num(nrow(sets))` sets, all fitted and evaluated on the same data.
+
+```{r hedonic-age}
+# hedonic regression with age as one number; target: cumulative return over retail
+fit_hed <- list(`Theme, size, age` = lm(prem15 ~ theme_ml + size + age, data = sets))
+```
+
+```{r reg-helpers}
+# one OLS fit to one row per coefficient: estimate, standard error, t, p and stars
+coef_table <- function(fit, se = c("classical", "HC1")){
+  se <- match.arg(se)                                                # "classical" or "HC1"
+  b  <- coef(fit)                                                    # all coefficients
+  aliased <- names(b)[is.na(b)]                                      # collinear columns (lm gives NA)
+  b  <- b[!is.na(b)]                                                 # keep the estimated ones
+  V  <- if (se == "classical") vcov(fit) else vcovHC(fit, type = "HC1")   # covariance matrix
+  s  <- sqrt(diag(V))[names(b)]                                      # standard errors
+  t  <- b / s                                                        # t-statistics
+  p  <- 2 * pt(-abs(t), df = df.residual(fit))                       # two-sided p-values
+  bind_rows(tibble(Term = names(b), Estimate = b, SE = s, t = t, p = p),
+            tibble(Term = aliased, Estimate = NA_real_, SE = NA_real_, t = NA_real_, p = NA_real_)) %>%
+    mutate(Sig. = case_when(is.na(p) ~ "aliased", p < 0.01 ~ "***", p < 0.05 ~ "**", p < 0.1 ~ "*", TRUE ~ ""))
+}
+
+# several fits to one table: each cell is "estimate stars (SE)", fit statistics at the bottom
+reg_table <- function(fits, digits = 3){
+  fmt <- function(x) formatC(x, format = "g", digits = digits)       # "g" keeps very small numbers readable
+  cells <- imap(fits, function(fit, nm){
+    coef_table(fit) %>%
+      transmute(Term, !!nm := ifelse(is.na(Estimate), "aliased",
+                                     paste0(fmt(Estimate), Sig., " (", fmt(SE), ")")))
+  }) %>% reduce(full_join, by = "Term")                              # one column per model
+  terms <- unique(unlist(map(fits, ~ names(coef(.x)))))              # coefficient order as in the models
+  cells <- cells %>% slice(match(terms, Term)) %>% mutate(across(-Term, ~ replace_na(.x, "")))
+  stats <- map_dfc(fits, function(fit){
+    s <- summary(fit)
+    c(nobs(fit),                                                     # number of sets
+      formatC(s$r.squared, format = "f", digits = 3),
+      formatC(s$adj.r.squared, format = "f", digits = 3),
+      formatC(pf(s$fstatistic[1], s$fstatistic[2], s$fstatistic[3], lower.tail = FALSE), format = "e", digits = 2))   # F-test p
+  })
+  bind_rows(cells, bind_cols(Term = c("Sets (N)", "R squared", "Adjusted R squared", "F-test p-value"), stats))
+}
+
+# non-dummy variables only: classical and robust (HC1) tests side by side
+robust_check <- function(fits, keep){
+  imap_dfr(fits, function(fit, nm){
+    full_join(coef_table(fit, "classical") %>% select(Term, Estimate, t, p, Sig.),
+              coef_table(fit, "HC1") %>% select(Term, `t (HC1)` = t, `p (HC1)` = p, `Sig. (HC1)` = Sig.),
+              by = "Term") %>%
+      filter(Term %in% keep) %>%                                     # keep the listed variables
+      mutate(Model = nm, .before = 1,
+             Estimate = formatC(Estimate, format = "g", digits = 3))   # as text, so kable does not round small values to 0
+  })
+}
+cont_vars <- c("(Intercept)", "age", "pieces", "pieces_sq", "minifigs", "log_retail", "prem15", "log_p15", "y15")
+```
+
+```{r hedonic-age-table, echo = FALSE}
+kable(reg_table(fit_hed), align = "lr",
+      caption = paste0("OLS on all sets. Target: cumulative return over retail, Dec 2015. Estimate (classical SE); *** p < 0.01, ** p < 0.05, * p < 0.1. ",
+                       "Reference levels: theme ", levels(sets$theme_ml)[1], ", size group ", levels(sets$size)[1]))
+```
+
+## 2.6 Why we do not simply train on 2015 and test on 2019
+
+A natural first test is to train on the 2015 cross-section and "predict" the 2018-2019 prices of the same sets with the same target definition, the return since release. It gives hit ratios near 70%. This is not forecasting.
+
+```{r persistence}
+# return since release measured at the last 2018-2019 price
+tp <- sets %>% filter(!is.na(y_fwd)) %>%
+  mutate(y_1819 = log(p_end / p_retail) /
+           (year(date_end) - year + (month(date_end) - 12) / 12))   # divided by the age at that date
+```
+
+```{r persistence-table, echo = FALSE}
+tibble(Check = c("Correlation: return since release in 2015 vs in 2019",
+                 "Median hit of the rule \"rank 2019 like 2015\" (no model)",
+                 "Median hit of the same rule against the forward return"),
+       Value = c(cor(tp$y15, tp$y_1819),
+                 mean((tp$y15 > median(tp$y15)) == (tp$y_1819 > median(tp$y_1819))),   # same side of the median
+                 mean((tp$y15 > median(tp$y15)) == (tp$y_fwd > median(tp$y_fwd))))) %>%
+  kable(digits = 3, caption = "Persistence, not prediction")
+```
+
+**Result.** The return since release measured in 2019 contains the return since release measured in 2015 plus three more years, so the two are correlated `r f3(cor(tp$y15, tp$y_1819))`. Ranking sets by their own 2015 return, with no model, already gives a hit ratio of `r pct(mean((tp$y15 > median(tp$y15)) == (tp$y_1819 > median(tp$y_1819))))`. Against the forward return the same rule scores `r pct(mean((tp$y15 > median(tp$y15)) == (tp$y_fwd > median(tp$y_fwd))))`, below a coin flip. The rule used in every test below: the test target must never share information with the training target, and the benchmark is the simplest rule that uses the same information.
+
+# 3. Results and analysis
+
+All cross-validation runs are computed first, so that H2 can compare models across every test.
+
+```{r cv-cross-section, cache = TRUE}
+# Test 1, random folds. Baseline variables: only the naive model and OLS
+oof_base <- cv_models(sets, "y15", f_base, c("theme_ml", "size", "year_ml"), models = c("Naive (mean)", "OLS"))
+# baseline variables plus characteristics: all eight models
+oof_full <- cv_models(sets, "y15", f_full, rhs_full)
+
+res2 <- bind_rows(score(oof_base) %>% mutate(Features = "Baseline (theme, size, year)"),
+                  score(oof_full) %>% mutate(Features = "Baseline + pieces, minifigures, retail price")) %>%
+  select(Features, everything())
+```
+
+```{r cv-grouped, cache = TRUE}
+# Test 1, grouped folds. Unseen themes: no theme dummies
+f_no_theme   <- ~ size + year_ml + pieces + pieces_sq + minifigs + log_retail
+rhs_no_theme <- c("size", "year_ml", "pieces", "minifigs", "log_retail")
+# unseen years: age as a number instead of year dummies
+f_no_year    <- ~ theme_ml + size + age + pieces + pieces_sq + minifigs + log_retail
+rhs_no_year  <- c("theme_ml", "size", "age", "pieces", "minifigs", "log_retail")
+grp_models   <- c("Naive (mean)", "OLS", "Random forest")   # linear benchmark and the best non-linear model
+
+# four runs: random and grouped folds for each question, same features within each question
+grp_runs <- list(
+  list(Question = "Unseen themes", Folds = "Random sets",  f = f_no_theme, rhs = rhs_no_theme, group = NULL),
+  list(Question = "Unseen themes", Folds = "Whole themes", f = f_no_theme, rhs = rhs_no_theme, group = "theme"),
+  list(Question = "Unseen years",  Folds = "Random sets",  f = f_no_year,  rhs = rhs_no_year,  group = NULL),
+  list(Question = "Unseen years",  Folds = "Whole years",  f = f_no_year,  rhs = rhs_no_year,  group = "year"))
+
+res2_grp <- map_dfr(grp_runs, function(r)
+  score(cv_models(sets, "y15", r$f, r$rhs, group = r$group, models = grp_models)) %>%
+    mutate(Question = r$Question, Folds = r$Folds)) %>%
+  select(Question, Folds, Model, `OOS R2`, RMSE, `Rank corr.`)
+```
+
+```{r cv-forward, cache = TRUE}
+# Test 2: forward return 2015-19
+oof_f_char <- cv_models(sets, "y_fwd", f_full, rhs_full)                  # characteristics only
+oof_f_mom  <- cv_models(sets, "y_fwd", f_mom,  rhs_mom)                   # plus the 2015 price history
+oof_f_y15  <- cv_models(sets, "y_fwd", ~ y15, "y15", models = c("OLS"))   # the annual return since release alone
+
+res3 <- bind_rows(score(oof_f_char) %>% mutate(Features = "Characteristics"),
+                  score(oof_f_mom)  %>% mutate(Features = "Characteristics + 2015 price history"),
+                  score(oof_f_y15)  %>% mutate(Features = "Annual return since release only")) %>%
+  select(Features, everything())
+```
+
+```{r cv-clean, cache = TRUE}
+# Test 3: clean window, forward return 2018-19 with features as of Dec 2015
+oof_c_char <- cv_models(sets, "y_fwd2", f_full, rhs_full)
+oof_c_mom  <- cv_models(sets, "y_fwd2", f_mom,  rhs_mom)
+
+res4 <- bind_rows(score(oof_c_char) %>% mutate(Features = "Characteristics"),
+                  score(oof_c_mom)  %>% mutate(Features = "Characteristics + 2015 price history")) %>%
+  select(Features, everything())
+best4 <- res4 %>% filter(Model != "Naive (mean)") %>% slice_min(RMSE, n = 1)   # lowest error in this window
+```
+
+## 3.1 H1: the hedonic relation generalises, least to new release years
+
+```{r h1-table, echo = FALSE}
+kable(res2 %>% filter(Model %in% c("Naive (mean)", "OLS")), digits = 3,
+      caption = "Held-out sets (5-fold CV by set), OLS against the naive mean. Target: annual return since release")
+kable(res2_grp %>% filter(Model != "Random forest"), digits = 3,
+      caption = "OLS on grouped folds vs random folds, same features within each question. Target: annual return since release")
+```
+
+```{r h1-helpers, echo = FALSE}
+# values used in the text below
+ols_base <- res2 %>% filter(grepl("^Baseline \\(", Features), Model == "OLS")
+ols_full <- res2 %>% filter(!grepl("^Baseline \\(", Features), Model == "OLS")
+grp_ols  <- res2_grp %>% filter(Model == "OLS") %>% select(Question, Folds, `OOS R2`) %>%
+  pivot_wider(names_from = Folds, values_from = `OOS R2`)
+```
+
+**Result.** H1~0~ is rejected. The naive mean scores about zero by construction. On held-out sets, OLS with theme, size and release year keeps an out-of-sample R² of `r f3(ols_base$"OOS R2")`; adding pieces, minifigures and the retail price lifts it to `r f3(ols_full$"OOS R2")`. Holding out whole themes, OLS reaches `r f3(grp_ols$"Whole themes"[grp_ols$Question == "Unseen themes"])` against `r f3(grp_ols$"Random sets"[grp_ols$Question == "Unseen themes"])` with random folds on the same features. Holding out whole release years, it reaches `r f3(grp_ols$"Whole years"[grp_ols$Question == "Unseen years"])` against `r f3(grp_ols$"Random sets"[grp_ols$Question == "Unseen years"])`: still above the naive mean, but much weaker. Two possible reasons, which we do not test: each release cohort meets its own market, and the release year also fixes the holding period of the target, so an unseen year forces the model to extrapolate. The target is the annualised return, so R² is lower than the 0.47 of the cumulative return in Section 2.5.
+
+## 3.2 H2: non-linear models capture more, mainly in the cross-section
+
+```{r h2-table, echo = FALSE}
+# all eight models on unseen sets, full hedonic features
+res2_full <- res2 %>% filter(!grepl("^Baseline \\(", Features), Model != "Naive (mean)")
+kable(res2 %>% filter(!grepl("^Baseline \\(", Features)), digits = 3,
+      caption = "All models on held-out sets (5-fold CV by set), full hedonic features. Target: annual return since release")
+
+# OLS against the random forest in every test
+h2_tab <- bind_rows(
+  res2 %>% filter(!grepl("^Baseline \\(", Features)) %>% mutate(Test = "Unseen sets"),
+  res2_grp %>% filter(Folds == "Whole themes") %>% mutate(Test = "Unseen themes"),
+  res2_grp %>% filter(Folds == "Whole years") %>% mutate(Test = "Unseen release years"),
+  res3 %>% filter(Features == "Characteristics") %>% mutate(Test = "Forward return 2015-19, characteristics"),
+  res3 %>% filter(Features == "Characteristics + 2015 price history") %>% mutate(Test = "Forward return 2015-19, + 2015 price history"),
+  res4 %>% filter(Features == "Characteristics + 2015 price history") %>% mutate(Test = "Forward return 2018-19 (clean window), + 2015 price history")) %>%
+  filter(Model %in% c("OLS", "Random forest")) %>%
+  select(Test, Model, `OOS R2`) %>%
+  pivot_wider(names_from = Model, values_from = `OOS R2`) %>%
+  mutate(gain = `Random forest` - OLS) %>%
+  select(Test, OLS, `Random forest`, gain)
+kable(h2_tab, digits = 3, col.names = c("Test", "OLS", "Random forest", "Gain of random forest"),
+      caption = "Out-of-sample R², OLS vs random forest, every test")
+```
+
+**Result.** H2~0~ is rejected for non-linear models but not for penalised ones. With the full hedonic features on unseen sets, the best penalised regression changes the out-of-sample R² of OLS by `r f3(max(res2_full$"OOS R2"[res2_full$Model %in% c("Ridge", "LASSO", "Elastic net")]) - ols_full$"OOS R2")`: shrinkage does not help at this sample size. The best tree model adds `r f3(max(res2_full$"OOS R2"[res2_full$Model %in% c("Tree", "Random forest", "XGBoost")]) - ols_full$"OOS R2")`, so the hedonic relation has non-linearities or interactions that OLS misses; we do not test which. The random forest gains `r f3(h2_tab$gain[1])` over OLS on unseen sets and `r f3(h2_tab$gain[2])` on unseen themes, but only between `r f3(min(h2_tab$gain[3:6]))` and `r f3(max(h2_tab$gain[3:6]))` on unseen release years and on returns after 2015. Non-linear models capture the hedonic characteristics better in the cross-section; the advantage does not carry over through time. 
+
+## 3.3 H3: 2015 information predicts the 2015-19 return
+
+```{r h3-forward-table, echo = FALSE}
+kable(res3, digits = 3, caption = "Held-out sets (5-fold CV by set). Target: forward return 2015-19 (log, p.a.)")
+```
+
+```{r h3-forward-plot, fig.cap = "Past winners did worse afterwards: annual return since release against the forward return 2015-19"}
+sets %>% filter(!is.na(y_fwd)) %>%                                   # sets with a forward return
+  ggplot(aes(x = y15, y = y_fwd)) +
+  geom_point(alpha = 0.25, size = 0.8) +                             # one point per set
+  geom_smooth(method = "lm", colour = "#0570EA") +                   # straight-line fit
+  geom_hline(yintercept = 0, linetype = 2) +                         # zero return
+  labs(x = "Annual return since release, Dec 2015", y = "Forward return Dec 2015 to Apr 2019 (p.a.)") +
+  theme_light()
+```
+
+**Result.** Characteristics alone predict some of the forward return (out-of-sample R² up to `r f3(max(res3$"OOS R2"[res3$Features == "Characteristics"]))`). Adding the 2015 price history raises it to `r f3(max(res3$"OOS R2"))`. The correlation between the annual return since release and the forward return is `r f3(cor(sets$y15, sets$y_fwd, use = "complete.obs"))`: the sets that had appreciated most did worse afterwards. Part of this is mechanical: a too-high December 2015 price quote raises the 2015 premium and lowers the measured forward return at the same time. Section 3.5 removes this link.
+
+## 3.4 H3: the driver is the 2015 premium, not past return
+
+OLS on all sets with a forward price. Age enters as one number in place of the release-year dummies. The target is the forward return 2015-19, held over the same window for every set.
+
+```{r h3-ols}
+# feature sets with age as a number
+f_char_agen <- ~ theme_ml + size + age + pieces + pieces_sq + minifigs + log_retail
+f_mom_agen  <- ~ theme_ml + size + age + pieces + pieces_sq + minifigs + log_retail + prem15 + log_p15 + y15
+
+# three OLS fits on all sets, target: forward return 2015-19
+fits3 <- list(`Characteristics`                     = lm(update(f_char_agen, y_fwd ~ .), data = sets),
+              `Characteristics + 2015 price history` = lm(update(f_mom_agen,  y_fwd ~ .), data = sets),
+              `Annual return since release only`     = lm(y_fwd ~ y15, data = sets))
+
+# key coefficients as on the slide: robust (HC1) t for non-dummy variables, classical t for themes
+key_terms <- c(prem15 = "Cumulative return over retail, Dec 2015",
+               y15 = "Annual return since release, Dec 2015",
+               log_retail = "log retail price",
+               age = "Age (years since release)",
+               pieces = "Pieces (per 1,000)",
+               minifigs = "Minifigures",
+               theme_mlArchitecture = "Architecture",
+               theme_mlCastle = "Castle",
+               `theme_mlHarry Potter` = "Harry Potter",
+               theme_mlBatman = "Batman",
+               theme_mlAgents = "Agents")
+key_table <- function(fit){
+  cl <- coef_table(fit, "classical")
+  hc <- coef_table(fit, "HC1")
+  is_dummy <- grepl("^theme_ml|^size", cl$Term)                      # dummies: classical t
+  tibble(Term = cl$Term, Estimate = cl$Estimate,
+         t = ifelse(is_dummy, cl$t, hc$t[match(cl$Term, hc$Term)]))
+}
+key3 <- full_join(key_table(fits3[[1]]) %>% rename(`Char. only` = Estimate, `t, char. only` = t),
+                  key_table(fits3[[2]]) %>% rename(`+ 2015 prices` = Estimate, `t, + 2015 prices` = t),
+                  by = "Term") %>%
+  filter(Term %in% names(key_terms)) %>%
+  mutate(across(c(`Char. only`, `+ 2015 prices`), ~ ifelse(Term == "pieces", .x * 1000, .x)),   # pieces per 1,000
+         Term = unname(key_terms[Term])) %>%
+  slice(match(unname(key_terms), Term))
+```
+
+```{r h3-ols-table, echo = FALSE}
+kable(key3, digits = c(0, 4, 2, 4, 2),
+      caption = paste0("Key coefficients. Target: forward return 2015-19 (log, p.a.). t: robust (HC1) for non-dummy variables, classical for themes. ",
+                       "Reference theme: ", levels(sets$theme_ml)[1], ". Size dummies and pieces squared included."))
+kable(reg_table(fits3), align = "lrrr",
+      caption = paste0("Full OLS output. Target: forward return 2015-19 (log, p.a.). Estimate (classical SE); *** p < 0.01, ** p < 0.05, * p < 0.1. ",
+                       "Reference levels: theme ", levels(sets$theme_ml)[1], ", size group ", levels(sets$size)[1]))
+kable(robust_check(fits3, cont_vars), digits = 3,
+      caption = "Non-dummy variables: classical vs heteroskedasticity-robust (HC1) tests")
+```
+
+```{r h3-ols-helpers, echo = FALSE}
+ct_mom <- coef_table(fits3[[2]], "HC1")   # robust tests, characteristics + 2015 price history
+ct_y15 <- coef_table(fits3[[3]], "HC1")   # robust tests, annual return since release only
+b_bat_2015 <- coef(fit_hed[[1]])["theme_mlBatman"]   # Batman premium in the 2015 hedonic regression
+```
+
+**Result.** The cumulative return over retail dominates: `r f3(ct_mom$Estimate[ct_mom$Term == "prem15"])` with a robust t of `r f2(ct_mom$t[ct_mom$Term == "prem15"])`. A premium 0.1 log points higher means about `r f2(-10 * ct_mom$Estimate[ct_mom$Term == "prem15"])` points less return a year. On its own the annual return since release has a slope of `r f3(ct_y15$Estimate[ct_y15$Term == "y15"])` (t = `r f2(ct_y15$t[ct_y15$Term == "y15"])`), but once the premium is in it is not significant (t = `r f2(ct_mom$t[ct_mom$Term == "y15"])`). H3 is therefore about the premium level, not the past annual return. The age effect shrinks once the price history enters, consistent with older sets earning less through their higher premium. Themes also partly reverse: Batman had one of the largest 2015 premiums (`r f2(b_bat_2015)` in the hedonic regression of Section 2.5) and a negative effect on the forward return. In the second model the December 2015 log price equals the premium plus the log retail price exactly, so OLS drops it ("aliased"). In-sample R² rises from `r f3(summary(fits3[[1]])$r.squared)` to `r f3(summary(fits3[[2]])$r.squared)`.
+
+## 3.5 H3: clean window, is the reversal a measurement artefact?
+
+```{r h3-clean-table, echo = FALSE}
+kable(res4, digits = 3, caption = "Held-out sets (5-fold CV by set). Target: forward return 2018-19, features as of December 2015")
+```
+
+To check the sign of the reversal in the clean window, we fit the OLS of Section 3.4 (characteristics + 2015 price history) with the forward return 2018-19 as target. The middle column refits the 2015-19 model on the same sets, so a change from it to the clean window comes from the target window, not from the sample.
+
+```{r h3-clean-ols}
+# same OLS as Section 3.4, three versions: forward return on all sets,
+# forward return on the clean-window sets only, and the clean window itself
+sets_cw <- sets %>% filter(!is.na(y_fwd2))                                   # sets with a clean-window return
+fits_cw <- list(`Forward 2015-19, all sets`  = fits3[[2]],
+                `Forward 2015-19, same sets` = lm(update(f_mom_agen, y_fwd  ~ .), data = sets_cw),
+                `Clean window 2018-19`       = lm(update(f_mom_agen, y_fwd2 ~ .), data = sets_cw))
+cw_terms <- c(key_terms, `(Intercept)` = "Intercept")              # same rows as the key table of Section 3.4
+# one column per fit: "estimate (t) stars"; t robust (HC1) for non-dummy variables, classical for themes (key_table)
+key_cw <- imap(fits_cw, function(fit, nm){
+  key_table(fit) %>%
+    filter(Term %in% names(cw_terms)) %>%
+    mutate(Estimate = ifelse(Term == "pieces", 1000 * Estimate, Estimate),   # pieces per 1,000
+           p = 2 * pt(-abs(t), df = df.residual(fit)),
+           Sig. = case_when(p < 0.01 ~ "***", p < 0.05 ~ "**", p < 0.1 ~ "*", TRUE ~ "")) %>%
+    transmute(Term, !!nm := paste0(formatC(Estimate, format = "f", digits = 4),
+                                   " (t ", formatC(t, format = "f", digits = 2), ") ", Sig.))
+}) %>%
+  reduce(full_join, by = "Term") %>%
+  slice(match(names(cw_terms), Term)) %>%                            # rows in the order of cw_terms
+  mutate(Term = unname(cw_terms[Term]))
+# number of sets and in-sample R squared under the coefficients
+stats_cw <- map_dfc(fits_cw, function(fit) c(num(nobs(fit)), formatC(summary(fit)$r.squared, format = "f", digits = 3)))
+key_cw <- bind_rows(key_cw, bind_cols(Term = c("Sets (N)", "R squared, in sample"), stats_cw))
+```
+
+```{r h3-clean-ols-table, echo = FALSE}
+kable(key_cw, align = "lrrr",
+      caption = paste0("OLS, characteristics + 2015 price history, as in Section 3.4. Estimate (t); t robust (HC1) for non-dummy variables, classical for themes; ",
+                       "*** p < 0.01, ** p < 0.05, * p < 0.1. Reference theme: ", levels(sets$theme_ml)[1], ". Size dummies and pieces squared included."))
+kable(robust_check(fits_cw[3], cont_vars), digits = 3,
+      caption = "Clean window, non-dummy variables: classical vs robust (HC1) tests")
+```
+
+**Result.** Partly an artefact. The reversal is still there: the rank correlation is `r f3(max(res4$"Rank corr."[res4$Features != "Characteristics"]))` with the 2015 price history against `r f3(max(res4$"Rank corr."[res4$Features == "Characteristics"]))` with characteristics alone, and the best model, **`r best4$Model`**, reaches an out-of-sample R² of `r f3(best4$"OOS R2")`. But the best R² falls from `r f3(max(res3$"OOS R2"))` to `r f3(max(res4$"OOS R2"))`, so much of the first result came from the shared price or from the shorter, later window. The channel is *weakened*, not closed: price-guide quotes can go stale, so a too-high quote in December 2015 may persist into January 2018. The result *supports* mean reversion but does not prove it; theme fashions and re-releases of popular sets could produce the same pattern.
+
+## 3.6 H3: power and significance by test
+
+```{r h3-summary, echo = FALSE}
+ct_cw <- coef_table(fits_cw[[3]], "HC1")   # robust tests, clean window (Section 3.5)
+h3_tab <- tibble(
+  Test = c("Annual return since release only", "Forward return", "Clean window"),
+  `Target window` = c("Dec 2015 to Apr 2019", "Dec 2015 to Apr 2019", "Jan 2018 to Apr 2019"),
+  `Predictive power (out of sample)` = c(
+    paste0("R² ", f3(res3$`OOS R2`[res3$Features == "Annual return since release only"]),
+           ", rank corr. ", f3(res3$`Rank corr.`[res3$Features == "Annual return since release only"])),
+    paste0("R² ", f3(max(res3$`OOS R2`[res3$Features == "Characteristics"])), " to ", f3(max(res3$`OOS R2`)),
+           " with 2015 price history, rank corr. ", f3(max(res3$`Rank corr.`))),
+    paste0("R² ", f3(max(res4$`OOS R2`[res4$Features == "Characteristics"])), " to ", f3(max(res4$`OOS R2`)),
+           ", rank corr. ", f3(max(res4$`Rank corr.`[res4$Features == "Characteristics"])), " to ", f3(max(res4$`Rank corr.`)))),
+  `Key factor` = c(paste0("Annual return since release: ", f3(ct_y15$Estimate[ct_y15$Term == "y15"])),
+                   paste0("Cumulative return over retail: ", f3(ct_mom$Estimate[ct_mom$Term == "prem15"])),
+                   paste0("Cumulative return over retail: ", f3(ct_cw$Estimate[ct_cw$Term == "prem15"]))),
+  Significance = c(paste0("t (HC1) = ", f2(ct_y15$t[ct_y15$Term == "y15"])),
+                   paste0("t (HC1) = ", f2(ct_mom$t[ct_mom$Term == "prem15"])),
+                   paste0("t (HC1) = ", f2(ct_cw$t[ct_cw$Term == "prem15"]))))
+kable(h3_tab, caption = "Premium reversal: predictive power, key factor and significance by test")
+```
+
+**Result.** H3~0~ is rejected, but the reversal is not proven. It appears in every test. As the design gets stricter, the best out-of-sample R² falls from `r f3(max(res3$"OOS R2"))` to `r f3(max(res4$"OOS R2"))` and the premium coefficient from `r f3(ct_mom$Estimate[ct_mom$Term == "prem15"])` to `r f3(ct_cw$Estimate[ct_cw$Term == "prem15"])`, but it stays statistically significant (robust t `r f2(ct_cw$t[ct_cw$Term == "prem15"])`).
+
+# 4. Limitations
+
+- *Period.* Forward tests cover December 2015 to April 2019 only. The data hold no secondary-market prices before 2015, so nothing here describes today's market.
+- *Prices.* Monthly aggregates of eBay sales from BrickPicker's price guide, "approximate" and "several months old" by the source's own description. The 2018-2019 file's method is undocumented; the check in Section 2.2 cannot detect a method change of a few percent. All returns are before costs.
+- *Stale quotes.* The clean window removes the direct mechanical link through the 2015 price but only weakens it: a stale 2015 quote can still be in the January 2018 price.
+- *Dependence.* Sets of one theme move together. The t-statistics are robust to heteroskedasticity (HC1) for numeric variables and classical for theme dummies, but none is clustered by theme, so they may overstate significance. With essentially one time period, the effective sample in time is small.
+- *Sample.* `r nrow(raw_2015) - nrow(sets)` sets are dropped in 2015, `r sum(is.na(sets$p_end))` have no 2018-2019 price and `r sum(is.na(sets$p_jan18))` no January 2018 price. These are probably the least traded, so the results lean towards liquid sets.
+- *Models.* Ridge, LASSO and elastic net choose their penalty by cross-validation inside each training fold; the tree, random forest and XGBoost use fixed settings. The model ranking in H2 is indicative.
+
+# 5. Conclusion
+
+1. **H1~0~, out-of-sample R² ≤ 0: rejected.** OLS keeps an out-of-sample R² of `r f3(ols_full$"OOS R2")` on unseen sets, `r f3(grp_ols$"Whole themes"[grp_ols$Question == "Unseen themes"])` on unseen themes and `r f3(grp_ols$"Whole years"[grp_ols$Question == "Unseen years"])` on unseen release years, against about zero for the naive mean.
+2. **H2~0~, penalised and non-linear models do not beat OLS: rejected for non-linear models, not rejected for penalised ones.** The random forest adds `r f3(h2_tab$gain[1])` over OLS on unseen sets and `r f3(h2_tab$gain[2])` on unseen themes, but at most `r f3(max(h2_tab$gain[3:6]))` on unseen years and on returns after 2015. The best penalised regression changes the R² of OLS by only `r f3(max(res2_full$"OOS R2"[res2_full$Model %in% c("Ridge", "LASSO", "Elastic net")]) - ols_full$"OOS R2")`. H1~0~ and H2~0~ are judged on out-of-sample R², not on a formal test.
+3. **H3~0~, the 2015 premium has no effect on forward returns: rejected.** The premium coefficient is `r f3(ct_mom$Estimate[ct_mom$Term == "prem15"])` (robust t `r f2(ct_mom$t[ct_mom$Term == "prem15"])`) for 2015-19 and `r f3(ct_cw$Estimate[ct_cw$Term == "prem15"])` (robust t `r f2(ct_cw$t[ct_cw$Term == "prem15"])`) in the clean window. Stale quotes, theme fashions and re-releases remain possible explanations, so the reversal is not proven.

@@ -1,0 +1,5 @@
+"0","tibble(Model = c(""XGBoost (7 features, extreme 40% of labels)"", ""Naive (training mean)""),"
+"0","       `Test MSE` = c(mse_xgb, mse(pred_naive)),"
+"0","       `Hit ratio` = c(hit_xgb, hit(pred_naive)),"
+"0","       `Share predicted up` = c(mean(pred_xgb > 0), 1)) %>%"
+"0","  kable(digits = 6, caption = ""XGBoost regression on the full test sample"")"

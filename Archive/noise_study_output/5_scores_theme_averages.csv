@@ -1,0 +1,101 @@
+k,target,scheme,features,model,themes,oos_r2,rank_corr
+1,Single month,Grouped by theme,Characteristics,Elastic net,32,0.16061093582862795,0.5366568914956011
+3,Averaged,Grouped by theme,Characteristics,Elastic net,32,0.13058149293322563,0.48240469208211145
+3,Single month,Grouped by theme,Characteristics,Elastic net,32,0.10484838963688514,0.5186950146627566
+5,Averaged,Grouped by theme,Characteristics,Elastic net,32,0.11840407979341494,0.5164956011730205
+5,Single month,Grouped by theme,Characteristics,Elastic net,32,0.10101112478518137,0.4358504398826979
+1,Single month,Grouped by theme,Characteristics,LASSO,32,0.1622893714696243,0.5399560117302052
+3,Averaged,Grouped by theme,Characteristics,LASSO,32,0.1325377894894555,0.48387096774193544
+3,Single month,Grouped by theme,Characteristics,LASSO,32,0.10574180051008464,0.5197947214076246
+5,Averaged,Grouped by theme,Characteristics,LASSO,32,0.11901859837304041,0.5197947214076246
+5,Single month,Grouped by theme,Characteristics,LASSO,32,0.09797984018562678,0.42595307917888564
+1,Single month,Grouped by theme,Characteristics,Naive (mean),32,-0.011485748588242695,0.06648236640492454
+3,Averaged,Grouped by theme,Characteristics,Naive (mean),32,-0.01153633108621599,0.06891693193524571
+3,Single month,Grouped by theme,Characteristics,Naive (mean),32,-0.007983425311638648,-0.012547376194732236
+5,Averaged,Grouped by theme,Characteristics,Naive (mean),32,-0.013191059052554355,0.043073082459528574
+5,Single month,Grouped by theme,Characteristics,Naive (mean),32,-0.016546408662549972,-0.01292192473785857
+1,Single month,Grouped by theme,Characteristics,OLS,32,0.054242633359308234,0.36363636363636365
+3,Averaged,Grouped by theme,Characteristics,OLS,32,-0.004863376400743746,0.280791788856305
+3,Single month,Grouped by theme,Characteristics,OLS,32,0.0033155564365282553,0.33944281524926684
+5,Averaged,Grouped by theme,Characteristics,OLS,32,-0.11127622210218058,0.32331378299120234
+5,Single month,Grouped by theme,Characteristics,OLS,32,-0.16285672404495477,0.2635630498533725
+1,Single month,Grouped by theme,Characteristics,Random forest,32,0.1326915875783682,0.531891495601173
+3,Averaged,Grouped by theme,Characteristics,Random forest,32,0.1344616625277053,0.4739736070381232
+3,Single month,Grouped by theme,Characteristics,Random forest,32,0.107825026156679,0.46554252199413493
+5,Averaged,Grouped by theme,Characteristics,Random forest,32,0.13657170110114691,0.42338709677419356
+5,Single month,Grouped by theme,Characteristics,Random forest,32,0.11679476800069255,0.3482404692082111
+1,Single month,Random by set,Characteristics,Elastic net,32,0.922936614970862,0.9457478005865102
+3,Averaged,Random by set,Characteristics,Elastic net,32,0.8965203702065381,0.8966275659824047
+3,Single month,Random by set,Characteristics,Elastic net,32,0.8879270020223082,0.9189882697947215
+5,Averaged,Random by set,Characteristics,Elastic net,32,0.8696736219242853,0.8958944281524928
+5,Single month,Random by set,Characteristics,Elastic net,32,0.7866200153754902,0.8277126099706745
+1,Single month,Random by set,Characteristics,LASSO,32,0.9192327663076922,0.9420821114369502
+3,Averaged,Random by set,Characteristics,LASSO,32,0.8945764593841368,0.8966275659824047
+3,Single month,Random by set,Characteristics,LASSO,32,0.889285942981553,0.9171554252199413
+5,Averaged,Random by set,Characteristics,LASSO,32,0.8708672110967023,0.8911290322580645
+5,Single month,Random by set,Characteristics,LASSO,32,0.7841692601612834,0.8277126099706745
+1,Single month,Random by set,Characteristics,Naive (mean),32,-0.0010116632132908254,-0.09604105571847507
+3,Averaged,Random by set,Characteristics,Naive (mean),32,-0.0015717683570655172,-0.0872434017595308
+3,Single month,Random by set,Characteristics,Naive (mean),32,-0.0019216146716674043,-0.07331378299120234
+5,Averaged,Random by set,Characteristics,Naive (mean),32,-0.002617689623657826,-0.11290322580645161
+5,Single month,Random by set,Characteristics,Naive (mean),32,-0.0022834207916624383,-0.04032258064516129
+1,Single month,Random by set,Characteristics,OLS,32,0.9639010936039631,0.9596774193548387
+3,Averaged,Random by set,Characteristics,OLS,32,0.9437434693663916,0.9186217008797655
+3,Single month,Random by set,Characteristics,OLS,32,0.947026936632301,0.9435483870967741
+5,Averaged,Random by set,Characteristics,OLS,32,0.9338760140855085,0.9142228739002932
+5,Single month,Random by set,Characteristics,OLS,32,0.9046328266002608,0.875
+1,Single month,Random by set,Characteristics,Random forest,32,0.9451902775026078,0.968841642228739
+3,Averaged,Random by set,Characteristics,Random forest,32,0.9388370794162941,0.9607771260997068
+3,Single month,Random by set,Characteristics,Random forest,32,0.9392186276901483,0.9655425219941349
+5,Averaged,Random by set,Characteristics,Random forest,32,0.9386386299180475,0.9640762463343109
+5,Single month,Random by set,Characteristics,Random forest,32,0.9330036056725117,0.9439149560117301
+1,Single month,Grouped by theme,Characteristics + 2015 price history,Elastic net,32,0.321319376316356,0.7214076246334311
+3,Averaged,Grouped by theme,Characteristics + 2015 price history,Elastic net,32,0.29711788756677604,0.7005131964809385
+3,Single month,Grouped by theme,Characteristics + 2015 price history,Elastic net,32,0.2680361988741602,0.7074780058651027
+5,Averaged,Grouped by theme,Characteristics + 2015 price history,Elastic net,32,0.2596796475854749,0.6766862170087976
+5,Single month,Grouped by theme,Characteristics + 2015 price history,Elastic net,32,0.24626418027769692,0.6620234604105572
+1,Single month,Grouped by theme,Characteristics + 2015 price history,LASSO,32,0.32346516551329474,0.7258064516129031
+3,Averaged,Grouped by theme,Characteristics + 2015 price history,LASSO,32,0.29795580638524877,0.7005131964809385
+3,Single month,Grouped by theme,Characteristics + 2015 price history,LASSO,32,0.2664585335665045,0.7100439882697948
+5,Averaged,Grouped by theme,Characteristics + 2015 price history,LASSO,32,0.2582989567195014,0.6766862170087976
+5,Single month,Grouped by theme,Characteristics + 2015 price history,LASSO,32,0.24644930084493766,0.658724340175953
+1,Single month,Grouped by theme,Characteristics + 2015 price history,Naive (mean),32,-0.011485748588242695,0.06648236640492454
+3,Averaged,Grouped by theme,Characteristics + 2015 price history,Naive (mean),32,-0.01153633108621599,0.06891693193524571
+3,Single month,Grouped by theme,Characteristics + 2015 price history,Naive (mean),32,-0.007983425311638648,-0.012547376194732236
+5,Averaged,Grouped by theme,Characteristics + 2015 price history,Naive (mean),32,-0.013191059052554355,0.043073082459528574
+5,Single month,Grouped by theme,Characteristics + 2015 price history,Naive (mean),32,-0.016546408662549972,-0.01292192473785857
+1,Single month,Grouped by theme,Characteristics + 2015 price history,OLS,32,0.1283196802290706,0.6972140762463342
+3,Averaged,Grouped by theme,Characteristics + 2015 price history,OLS,32,0.12637301387688415,0.6403958944281525
+3,Single month,Grouped by theme,Characteristics + 2015 price history,OLS,32,0.06063343511684016,0.6055718475073314
+5,Averaged,Grouped by theme,Characteristics + 2015 price history,OLS,32,0.1257155906261581,0.5894428152492668
+5,Single month,Grouped by theme,Characteristics + 2015 price history,OLS,32,0.10826340056232431,0.5245601173020528
+1,Single month,Grouped by theme,Characteristics + 2015 price history,Random forest,32,0.25977117461025645,0.7170087976539589
+3,Averaged,Grouped by theme,Characteristics + 2015 price history,Random forest,32,0.21589769995249342,0.6433284457478006
+3,Single month,Grouped by theme,Characteristics + 2015 price history,Random forest,32,0.19116911376088286,0.6140029325513197
+5,Averaged,Grouped by theme,Characteristics + 2015 price history,Random forest,32,0.21172920952508212,0.6308651026392962
+5,Single month,Grouped by theme,Characteristics + 2015 price history,Random forest,32,0.18017969710272008,0.5513196480938416
+1,Single month,Random by set,Characteristics + 2015 price history,Elastic net,32,0.914069486217569,0.9307184750733138
+3,Averaged,Random by set,Characteristics + 2015 price history,Elastic net,32,0.8791977258610527,0.905425219941349
+3,Single month,Random by set,Characteristics + 2015 price history,Elastic net,32,0.8873045277495621,0.9314516129032259
+5,Averaged,Random by set,Characteristics + 2015 price history,Elastic net,32,0.8658015302201534,0.8936950146627566
+5,Single month,Random by set,Characteristics + 2015 price history,Elastic net,32,0.8099860228457048,0.8387096774193549
+1,Single month,Random by set,Characteristics + 2015 price history,LASSO,32,0.9133091245743168,0.9336510263929618
+3,Averaged,Random by set,Characteristics + 2015 price history,LASSO,32,0.8826661363436924,0.905425219941349
+3,Single month,Random by set,Characteristics + 2015 price history,LASSO,32,0.8812477099206604,0.9270527859237536
+5,Averaged,Random by set,Characteristics + 2015 price history,LASSO,32,0.8646282697007803,0.8870967741935484
+5,Single month,Random by set,Characteristics + 2015 price history,LASSO,32,0.8054419564600548,0.8372434017595307
+1,Single month,Random by set,Characteristics + 2015 price history,Naive (mean),32,-0.0010116632132908254,-0.09604105571847507
+3,Averaged,Random by set,Characteristics + 2015 price history,Naive (mean),32,-0.0015717683570655172,-0.0872434017595308
+3,Single month,Random by set,Characteristics + 2015 price history,Naive (mean),32,-0.0019216146716674043,-0.07331378299120234
+5,Averaged,Random by set,Characteristics + 2015 price history,Naive (mean),32,-0.002617689623657826,-0.11290322580645161
+5,Single month,Random by set,Characteristics + 2015 price history,Naive (mean),32,-0.0022834207916624383,-0.04032258064516129
+1,Single month,Random by set,Characteristics + 2015 price history,OLS,32,0.9716943418465375,0.9673753665689149
+3,Averaged,Random by set,Characteristics + 2015 price history,OLS,32,0.9540351923453152,0.9285190615835777
+3,Single month,Random by set,Characteristics + 2015 price history,OLS,32,0.9565929323591846,0.9563782991202345
+5,Averaged,Random by set,Characteristics + 2015 price history,OLS,32,0.9455698511214575,0.9318181818181818
+5,Single month,Random by set,Characteristics + 2015 price history,OLS,32,0.9183019111118654,0.8988269794721407
+1,Single month,Random by set,Characteristics + 2015 price history,Random forest,32,0.9384782745378598,0.969208211143695
+3,Averaged,Random by set,Characteristics + 2015 price history,Random forest,32,0.9347031433572021,0.9607771260997068
+3,Single month,Random by set,Characteristics + 2015 price history,Random forest,32,0.9322411073575043,0.972873900293255
+5,Averaged,Random by set,Characteristics + 2015 price history,Random forest,32,0.9364957855119979,0.9607771260997068
+5,Single month,Random by set,Characteristics + 2015 price history,Random forest,32,0.9271486863343582,0.9424486803519062

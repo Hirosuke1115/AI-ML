@@ -1,0 +1,2 @@
+"0","kable(reg_all %>% select(-Family) %>% arrange(`Test MSE`), digits = 6,"
+"0","      caption = ""All regression models tried, ordered by test MSE"")"

@@ -1,0 +1,7 @@
+"0","ada_iter <- lapply(c(3, 10, 20), function(k){"
+"0","  set.seed(42)"
+"0","  fit <- adaboost(formula_C, data = as.data.frame(train_ada), nIter = k)   # Same subsample, same settings"
+"0","  tibble(nIter = k,"
+"0","         `Training accuracy` = mean(predict(fit, newdata = as.data.frame(train_ada))$class == train_ada$R1M_Usd_C),"
+"0","         `Test accuracy` = mean(predict(fit, newdata = as.data.frame(testing_sample))$class == testing_sample$R1M_Usd_C))"
+"0","}) %>% bind_rows()"

@@ -1,0 +1,1 @@
+"0","kable(xgb_depth, digits = 6, caption = ""XGBoost: max_depth"")"

@@ -1,0 +1,10 @@
+"0","set.seed(42)
+fit_xgb <- xgb.train(params = xgb_params, data = dtrain, nrounds = 30)
+"
+"2","[16:10:49] WARNING: src/learner.cc:790: 
+Parameters: { ""nrounds"" } are not used.
+
+"
+"0","pred_xgb <- predict(fit_xgb, x_test_xgb)"
+"0","mse_xgb <- mse(pred_xgb)"
+"0","hit_xgb <- hit(pred_xgb)"

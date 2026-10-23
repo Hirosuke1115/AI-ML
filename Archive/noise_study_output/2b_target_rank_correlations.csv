@@ -1,0 +1,6 @@
+"","k1_Single month","k3_Averaged","k5_Averaged","k3_Single month","k5_Single month"
+"k1_Single month",1,0.948,0.891,0.9,0.807
+"k3_Averaged",0.948,1,0.97,0.975,0.934
+"k5_Averaged",0.891,0.97,1,0.939,0.953
+"k3_Single month",0.9,0.975,0.939,1,0.894
+"k5_Single month",0.807,0.934,0.953,0.894,1

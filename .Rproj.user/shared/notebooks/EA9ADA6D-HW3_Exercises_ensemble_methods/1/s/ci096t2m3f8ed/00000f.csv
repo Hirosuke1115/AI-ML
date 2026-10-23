@@ -1,0 +1,6 @@
+"0","set.seed(42)"
+"0","train_ada <- training_sample %>% slice_sample(n = 10000)       # AdaBoost on a 10,000-stock subsample"
+"0",""
+"0","fit_ada <- adaboost(formula_C, data = as.data.frame(train_ada), nIter = 3)"
+"0","pred_ada <- predict(fit_ada, newdata = as.data.frame(testing_sample))$class"
+"0","acc_ada <- mean(pred_ada == testing_sample$R1M_Usd_C)"

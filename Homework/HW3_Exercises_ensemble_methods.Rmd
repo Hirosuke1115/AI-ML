@@ -78,7 +78,7 @@ set.seed(42)
 fit_RF <- randomForest(formula_full, data = training_sample,   # Chapter 6-style settings
                        sampsize = 10000, replace = FALSE,      # Each tree: 10,000 stocks, no repeats
                        nodesize = 250,                         # At least ~250 stocks per leaf
-                       ntree = 40, mtry = 30)                  # 40 trees, 30 random features per split
+                       ntree = 40, mtry = 10)                  # 40 trees, 30 random features per split
 
 pred_RF <- predict(fit_RF, testing_sample)
 mse_RF <- mse(pred_RF)

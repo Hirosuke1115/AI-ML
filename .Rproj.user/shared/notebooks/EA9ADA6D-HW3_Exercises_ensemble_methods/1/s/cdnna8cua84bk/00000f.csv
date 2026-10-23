@@ -1,0 +1,4 @@
+"0","tibble(Model = ""AdaBoost, nIter = 3"","
+"0","       `Test accuracy` = acc_ada,"
+"0","       `Share predicted up` = mean(pred_ada == ""TRUE"")) %>%"
+"0","  kable(digits = 4, caption = ""AdaBoost classification on the test sample"")"

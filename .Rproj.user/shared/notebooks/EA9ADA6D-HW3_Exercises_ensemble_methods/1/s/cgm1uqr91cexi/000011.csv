@@ -1,0 +1,7 @@
+"0",""
+"0","tibble(Model = c(""RF classification"", ""RF regression (Exercise 1)""),"
+"0","       Question = c(""Above the monthly median?"", ""Positive return?""),"
+"0","       Score = c(acc_RF_C, hit_RF),"
+"0","       Baseline = c(max(share_true, 1 - share_true), share_pos),"
+"0","       `Share predicted up` = c(mean(pred_RF_C == ""TRUE""), mean(pred_RF > 0))) %>%"
+"0","  kable(digits = 3, caption = ""Accuracy and hit ratio against their own baselines"")"

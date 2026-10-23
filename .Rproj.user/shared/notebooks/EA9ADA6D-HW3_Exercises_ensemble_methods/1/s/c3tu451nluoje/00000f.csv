@@ -1,0 +1,1 @@
+"0","kable(rf_trees, digits = 6, caption = ""Random forest with 7 features: number of trees"")"

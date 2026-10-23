@@ -1,0 +1,71 @@
+"0","library(tidyverse)"
+"1","── [1mAttaching core tidyverse packages[22m ──────────────────────────────────────────────────── tidyverse 2.0.0 ──
+[32m✔[39m [34mdplyr    [39m 1.2.1     [32m✔[39m [34mreadr    [39m 2.2.0
+[32m✔[39m [34mforcats  [39m 1.0.1     [32m✔[39m [34mstringr  [39m 1.6.0
+[32m✔[39m [34mggplot2  [39m 4.0.3     [32m✔[39m [34mtibble   [39m 3.3.1
+[32m✔[39m [34mlubridate[39m 1.9.5     [32m✔[39m [34mtidyr    [39m 1.3.2
+[32m✔[39m [34mpurrr    [39m 1.2.2     
+"
+"1","── [1mConflicts[22m ────────────────────────────────────────────────────────────────────── tidyverse_conflicts() ──
+[31m✖[39m [34mdplyr[39m::[32mfilter()[39m masks [34mstats[39m::filter()
+[31m✖[39m [34mdplyr[39m::[32mlag()[39m    masks [34mstats[39m::lag()
+[36mℹ[39m Use the ]8;;http://conflicted.r-lib.org/conflicted package]8;; to force all conflicts to become errors
+"
+"0","library(lubridate)"
+"0","library(knitr)"
+"0","library(randomForest)"
+"2","randomForest 4.7-1.2
+"
+"2","Type rfNews() to see new features/changes/bug fixes.
+"
+"2","
+Attaching package: ‘randomForest’
+
+"
+"2","The following object is masked from ‘package:dplyr’:
+
+    combine
+
+"
+"2","The following object is masked from ‘package:ggplot2’:
+
+    margin
+
+"
+"0","library(fastAdaboost)"
+"0","library(xgboost)"
+"0",""
+"0","load(""data_ml.RData"")                                   # Load the raw dataset"
+"0","data_ml <- data_ml %>%"
+"0","  filter(date > ""1999-12-31"", date < ""2019-01-01"") %>%   # Keep only the 2000-2018 window"
+"0","  arrange(stock_id, date)                                # Sort by stock, then time"
+"0",""
+"0","features <- colnames(data_ml[3:95])                     # Full feature set: 93 predictors"
+"0","features_short <- c(""Div_Yld"", ""Eps"", ""Mkt_Cap_12M_Usd"", ""Mom_11M_Usd"","
+"0","                    ""Ocf"", ""Pb"", ""Vol1Y_Usd"")           # Short feature set: 7 predictors"
+"0",""
+"0","dates <- sort(unique(data_ml$date))                     # All distinct months, in order"
+"0","split_date <- dates[floor(0.8 * length(dates))]         # Date marking the 80% point in time"
+"0",""
+"0","add_label <- function(df){"
+"0","  df %>%"
+"0","    group_by(date) %>%                                   # Compare stocks within each month"
+"0","    mutate(R1M_Usd_C = as.factor(R1M_Usd > median(R1M_Usd))) %>%   # Above-median = TRUE"
+"0","    ungroup()"
+"0","}"
+"0","data_ml <- add_label(data_ml)"
+"0",""
+"0","training_sample <- data_ml %>% filter(date <= split_date)   # First 80% of months"
+"0","testing_sample  <- data_ml %>% filter(date >  split_date)   # Last 20% of months, no overlap"
+"0","y_test <- testing_sample$R1M_Usd"
+"0",""
+"0","formula_full  <- as.formula(paste(""R1M_Usd ~"",   paste(features,       collapse = "" + "")))"
+"0","formula_short <- as.formula(paste(""R1M_Usd ~"",   paste(features_short, collapse = "" + "")))"
+"0","formula_C     <- as.formula(paste(""R1M_Usd_C ~"", paste(features,       collapse = "" + "")))"
+"0",""
+"0","mse <- function(p) mean((p - y_test)^2)                 # Test MSE"
+"0","hit <- function(p) mean(p * y_test > 0)                 # Hit ratio: share of correct signs"
+"0","pct <- function(x) paste0(formatC(100 * x, format = ""f"", digits = 1), ""%"")"
+"0","f6  <- function(x) formatC(x, format = ""f"", digits = 6)"
+"0",""
+"0","pred_naive <- rep(mean(training_sample$R1M_Usd), length(y_test))   # Always the training mean"

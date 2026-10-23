@@ -11,7 +11,7 @@
 
 <meta name="author" content="Hiro, Hendrik, Stefan" />
 
-<meta name="date" content="2026-10-22" />
+<meta name="date" content="2026-10-23" />
 
 <title>LEGO as an investment: out-of-sample tests of the hedonic premium</title>
 
@@ -1482,7 +1482,7 @@ border-radius: 0px;
 <h1 class="title toc-ignore">LEGO as an investment: out-of-sample tests
 of the hedonic premium</h1>
 <h4 class="author">Hiro, Hendrik, Stefan</h4>
-<h4 class="date">22 October 2026</h4>
+<h4 class="date">23 October 2026</h4>
 
 </div>
 
@@ -1952,9 +1952,9 @@ cumulative return over retail and the annual return since release. Eight
 models compete on the same folds: the naive mean and OLS (linear),
 ridge, LASSO and elastic net (penalised, penalty chosen by
 cross-validation inside each training fold), and a regression tree, a
-random forest and XGBoost (non-linear, fixed settings from the course).
-Scores: out-of-sample R² (above 0 beats the mean), RMSE, rank
-correlation, median hit and sign hit ratios.</p>
+random forest and XGBoost (non-linear, fixed settings). Scores:
+out-of-sample R² (above 0 beats the mean), RMSE, rank correlation,
+median hit and sign hit ratios.</p>
 <pre class="r"><code># feature sets. Dummies are built once on all sets, so every fold has the same columns
 f_base  &lt;- ~ theme_ml + size + year_ml                                       # baseline hedonic variables
 f_full  &lt;- ~ theme_ml + size + year_ml + pieces + pieces_sq + minifigs + log_retail   # plus set characteristics
@@ -1974,7 +1974,7 @@ fit_predict &lt;- function(model, X_tr, y_tr, X_te, df_tr, df_te, rhs, seed = 42
     &quot;LASSO&quot;         = as.numeric(predict(cv.glmnet(X_tr, y_tr, alpha = 1),   X_te, s = &quot;lambda.min&quot;)),
     &quot;Elastic net&quot;   = as.numeric(predict(cv.glmnet(X_tr, y_tr, alpha = 0.5), X_te, s = &quot;lambda.min&quot;)),
     &quot;Tree&quot;          = predict(rpart(reformulate(rhs, &quot;y&quot;), data = df_tr,
-                                    minbucket = 30, cp = 0.001, maxdepth = 4, xval = 0), df_te),    # small tree, settings from the course
+                                    minbucket = 30, cp = 0.001, maxdepth = 4, xval = 0), df_te),
     &quot;Random forest&quot; = predict(randomForest(reformulate(rhs, &quot;y&quot;), data = df_tr,
                                            ntree = 300, mtry = max(2, floor(length(rhs) / 3)),   # 300 trees, 1/3 of features per split
                                            nodesize = 10, sampsize = floor(0.7 * nrow(df_tr)), replace = FALSE), df_te),
@@ -2075,10 +2075,6 @@ differences can come from the sets with missing values that we drop. All
 later differences therefore come from the test design, not from the
 data. Note what the R² means: the regression has 77 parameters for 2,300
 sets, all fitted and evaluated on the same data.</p>
-<p>The same regression with <strong>age as one number</strong> instead
-of release-year dummies gives one slope per extra year and a theme
-premium for each theme. Section 3.4 compares these 2015 theme premiums
-with the theme effects on the forward return.</p>
 <pre class="r"><code># hedonic regression with age as one number; target: cumulative return over retail
 fit_hed &lt;- list(`Theme, size, age` = lm(prem15 ~ theme_ml + size + age, data = sets))</code></pre>
 <pre class="r"><code># one OLS fit to one row per coefficient: estimate, standard error, t, p and stars
@@ -2724,9 +2720,7 @@ interactions that OLS misses; we do not test which. The random forest
 gains 0.193 over OLS on unseen sets and 0.170 on unseen themes, but only
 between 0.004 and 0.036 on unseen release years and on returns after
 2015. Non-linear models capture the hedonic characteristics better in
-the cross-section; the advantage does not carry over through time. The
-tree models use fixed course settings, so the model ranking is
-indicative.</p>
+the cross-section; the advantage does not carry over through time.</p>
 </div>
 <div id="h3-2015-information-predicts-the-2015-19-return" class="section level2">
 <h2>3.3 H3: 2015 information predicts the 2015-19 return</h2>
@@ -3610,14 +3604,6 @@ exactly, so OLS drops it (“aliased”). In-sample R² rises from 0.179 to
 </div>
 <div id="h3-clean-window-is-the-reversal-a-measurement-artefact" class="section level2">
 <h2>3.5 H3: clean window, is the reversal a measurement artefact?</h2>
-<p>In the forward return 2015-19 the same December 2015 price appears
-twice: in the premium (a feature) and as the starting price of the
-target. Example: a set is worth 100 in December 2015 and in April 2019,
-with a retail price of 50. If the December 2015 price is recorded as 110
-by mistake, the premium looks higher and the forward return looks like
-ln(100/110) = -9.5%: a reversal created by the error alone. The clean
-window measures the forward return from January 2018, so the December
-2015 price stays only in the features.</p>
 <table>
 <caption>Held-out sets (5-fold CV by set). Target: forward return
 2018-19, features as of December 2015</caption>
@@ -4158,8 +4144,8 @@ price and 95 no January 2018 price. These are probably the least traded,
 so the results lean towards liquid sets.</li>
 <li><em>Models.</em> Ridge, LASSO and elastic net choose their penalty
 by cross-validation inside each training fold; the tree, random forest
-and XGBoost use fixed settings from the course. The model ranking in H2
-is indicative.</li>
+and XGBoost use fixed settings. The model ranking in H2 is
+indicative.</li>
 </ul>
 </div>
 <div id="conclusion" class="section level1">
@@ -4182,14 +4168,6 @@ returns: rejected.</strong> The premium coefficient is -0.152 (robust t
 Stale quotes, theme fashions and re-releases remain possible
 explanations, so the reversal is not proven.</li>
 </ol>
-<p>In-sample hedonic fits overstate what is predictable; the test design
-matters more than the model class.</p>
-<p><em>Data:</em> Dobrynskaya and Kishilova, Mendeley Data v9hhs66vm3
-(“DiB whole sample Dec 2015 prices”, “DiB whole sample Jan 2018 - Apr
-2019 prices”); data description in the sheet “About the sample”.
-<em>Methods:</em> Roberts et al. (2017), <em>Ecography</em> 40 (grouped
-cross-validation); Models and metrics as in the course homeworks
-(Coqueret and Guida, Chapters 5 and 6).</p>
 </div>
 
 

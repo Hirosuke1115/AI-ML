@@ -1,0 +1,7 @@
+"0",""
+"0","rf_trees %>%"
+"0","  pivot_longer(-Trees) %>%"
+"0","  ggplot(aes(x = factor(Trees), y = value, group = name)) +"
+"0","  geom_line() + geom_point() +"
+"0","  facet_wrap(~name, scales = ""free_y"") +"
+"0","  labs(x = ""Number of trees"", y = NULL) + theme_light()"

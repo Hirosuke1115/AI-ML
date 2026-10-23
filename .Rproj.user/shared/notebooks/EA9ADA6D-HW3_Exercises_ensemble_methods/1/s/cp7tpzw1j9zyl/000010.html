@@ -1,0 +1,38 @@
+<table style="width:100%;">
+<caption>Regression: best random forest and best XGBoost (chosen by test
+MSE)</caption>
+<colgroup>
+<col width="45%" />
+<col width="12%" />
+<col width="14%" />
+<col width="27%" />
+</colgroup>
+<thead>
+<tr>
+<th align="left">Model</th>
+<th align="right">Test MSE</th>
+<th align="right">Hit ratio</th>
+<th align="right">Share predicted up</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left">RF, 93 features, mtry 5 (Ex. 3)</td>
+<td align="right">0.045604</td>
+<td align="right">0.529571</td>
+<td align="right">0.950874</td>
+</tr>
+<tr>
+<td align="left">XGBoost, max_depth 2 (Ex. 7-8)</td>
+<td align="right">0.045104</td>
+<td align="right">0.514061</td>
+<td align="right">0.803270</td>
+</tr>
+<tr>
+<td align="left">Naive (training mean)</td>
+<td align="right">0.045774</td>
+<td align="right">0.532056</td>
+<td align="right">1.000000</td>
+</tr>
+</tbody>
+</table>

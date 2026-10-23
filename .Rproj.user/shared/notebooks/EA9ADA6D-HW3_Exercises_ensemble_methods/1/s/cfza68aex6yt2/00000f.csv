@@ -1,0 +1,6 @@
+"0","  fit <- randomForest(formula_full, data = training_sample,    # Exercise 1 specification
+                      sampsize = 50000, replace = FALSE, nodesize = 250,
+                      ntree = 40, mtry = m)
+"
+"2","Error: object 'm' not found
+"

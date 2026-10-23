@@ -1,0 +1,15 @@
+"0","tibble(Sample = c(""Training"", ""Test""),"
+"0","       From = c(min(training_sample$date), min(testing_sample$date)),"
+"0","       To = c(max(training_sample$date), max(testing_sample$date)),"
+"0","       Observations = c(nrow(training_sample), nrow(testing_sample))) %>%"
+"0","  kable(caption = ""Chronological 80/20 split"")"
+"2","Registered S3 methods overwritten by 'htmltools':
+  method               from         
+  print.html           tools:rstudio
+  print.shiny.tag      tools:rstudio
+  print.shiny.tag.list tools:rstudio
+"
+"2","Registered S3 method overwritten by 'rmarkdown':
+  method         from
+  print.paged_df     
+"
