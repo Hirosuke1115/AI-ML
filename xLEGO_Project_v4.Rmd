@@ -213,7 +213,7 @@ The return earned before 2015 is kept apart from the return earned after it, so 
 | 2 Forward return (H2, H3) | 5-fold CV by set | Characteristics, then + Dec 2015 price history | Forward return 2015-19 | Hindsight about returns after 2015 |
 | 3 Clean window (H2, H3) | 5-fold CV by set | Same, as of Dec 2015 | Forward return 2018-19 | Dec 2015 price in both feature and target: a quote error fakes a reversal |
 
-The *2015 price history* is the December 2015 price, the cumulative return over retail and the annual return since release. Eight models compete on the same folds: the naive mean and OLS (linear), ridge, LASSO and elastic net (penalised, penalty chosen by cross-validation inside each training fold), and a regression tree, a random forest and XGBoost (non-linear, fixed settings from the course). Scores: out-of-sample R² (above 0 beats the mean), RMSE, rank correlation, median hit and sign hit ratios.
+The *2015 price history* is the December 2015 price, the cumulative return over retail and the annual return since release. Eight models compete on the same folds: the naive mean and OLS (linear), ridge, LASSO and elastic net (penalised, penalty chosen by cross-validation inside each training fold), and a regression tree, a random forest and XGBoost (non-linear, fixed settings). Scores: out-of-sample R² (above 0 beats the mean), RMSE, rank correlation, median hit and sign hit ratios.
 
 ```{r cv-helpers}
 # feature sets. Dummies are built once on all sets, so every fold has the same columns
@@ -235,7 +235,7 @@ fit_predict <- function(model, X_tr, y_tr, X_te, df_tr, df_te, rhs, seed = 42){
     "LASSO"         = as.numeric(predict(cv.glmnet(X_tr, y_tr, alpha = 1),   X_te, s = "lambda.min")),
     "Elastic net"   = as.numeric(predict(cv.glmnet(X_tr, y_tr, alpha = 0.5), X_te, s = "lambda.min")),
     "Tree"          = predict(rpart(reformulate(rhs, "y"), data = df_tr,
-                                    minbucket = 30, cp = 0.001, maxdepth = 4, xval = 0), df_te),    # small tree, settings from the course
+                                    minbucket = 30, cp = 0.001, maxdepth = 4, xval = 0), df_te),
     "Random forest" = predict(randomForest(reformulate(rhs, "y"), data = df_tr,
                                            ntree = 300, mtry = max(2, floor(length(rhs) / 3)),   # 300 trees, 1/3 of features per split
                                            nodesize = 10, sampsize = floor(0.7 * nrow(df_tr)), replace = FALSE), df_te),
@@ -307,8 +307,6 @@ kable(rep_tab, digits = 4, caption = "Baseline hedonic regression: our estimates
 ```
 
 **Result.** Our estimates match the published ones: the largest difference is `r f3(rep_maxdiff)` and the R² is `r f3(summary(fit_base)$r.squared)` against 0.470. Small differences can come from the sets with missing values that we drop. All later differences therefore come from the test design, not from the data. Note what the R² means: the regression has `r rep_npar` parameters for `r num(nrow(sets))` sets, all fitted and evaluated on the same data.
-
-The same regression with **age as one number** instead of release-year dummies gives one slope per extra year and a theme premium for each theme. Section 3.4 compares these 2015 theme premiums with the theme effects on the forward return.
 
 ```{r hedonic-age}
 # hedonic regression with age as one number; target: cumulative return over retail
@@ -498,7 +496,7 @@ kable(h2_tab, digits = 3, col.names = c("Test", "OLS", "Random forest", "Gain of
       caption = "Out-of-sample R², OLS vs random forest, every test")
 ```
 
-**Result.** H2~0~ is rejected for non-linear models but not for penalised ones. With the full hedonic features on unseen sets, the best penalised regression changes the out-of-sample R² of OLS by `r f3(max(res2_full$"OOS R2"[res2_full$Model %in% c("Ridge", "LASSO", "Elastic net")]) - ols_full$"OOS R2")`: shrinkage does not help at this sample size. The best tree model adds `r f3(max(res2_full$"OOS R2"[res2_full$Model %in% c("Tree", "Random forest", "XGBoost")]) - ols_full$"OOS R2")`, so the hedonic relation has non-linearities or interactions that OLS misses; we do not test which. The random forest gains `r f3(h2_tab$gain[1])` over OLS on unseen sets and `r f3(h2_tab$gain[2])` on unseen themes, but only between `r f3(min(h2_tab$gain[3:6]))` and `r f3(max(h2_tab$gain[3:6]))` on unseen release years and on returns after 2015. Non-linear models capture the hedonic characteristics better in the cross-section; the advantage does not carry over through time. The tree models use fixed course settings, so the model ranking is indicative.
+**Result.** H2~0~ is rejected for non-linear models but not for penalised ones. With the full hedonic features on unseen sets, the best penalised regression changes the out-of-sample R² of OLS by `r f3(max(res2_full$"OOS R2"[res2_full$Model %in% c("Ridge", "LASSO", "Elastic net")]) - ols_full$"OOS R2")`: shrinkage does not help at this sample size. The best tree model adds `r f3(max(res2_full$"OOS R2"[res2_full$Model %in% c("Tree", "Random forest", "XGBoost")]) - ols_full$"OOS R2")`, so the hedonic relation has non-linearities or interactions that OLS misses; we do not test which. The random forest gains `r f3(h2_tab$gain[1])` over OLS on unseen sets and `r f3(h2_tab$gain[2])` on unseen themes, but only between `r f3(min(h2_tab$gain[3:6]))` and `r f3(max(h2_tab$gain[3:6]))` on unseen release years and on returns after 2015. Non-linear models capture the hedonic characteristics better in the cross-section; the advantage does not carry over through time. 
 
 ## 3.3 H3: 2015 information predicts the 2015-19 return
 
@@ -581,8 +579,6 @@ b_bat_2015 <- coef(fit_hed[[1]])["theme_mlBatman"]   # Batman premium in the 201
 
 ## 3.5 H3: clean window, is the reversal a measurement artefact?
 
-In the forward return 2015-19 the same December 2015 price appears twice: in the premium (a feature) and as the starting price of the target. Example: a set is worth 100 in December 2015 and in April 2019, with a retail price of 50. If the December 2015 price is recorded as 110 by mistake, the premium looks higher and the forward return looks like ln(100/110) = -9.5%: a reversal created by the error alone. The clean window measures the forward return from January 2018, so the December 2015 price stays only in the features.
-
 ```{r h3-clean-table, echo = FALSE}
 kable(res4, digits = 3, caption = "Held-out sets (5-fold CV by set). Target: forward return 2018-19, features as of December 2015")
 ```
@@ -657,7 +653,7 @@ kable(h3_tab, caption = "Premium reversal: predictive power, key factor and sign
 - *Stale quotes.* The clean window removes the direct mechanical link through the 2015 price but only weakens it: a stale 2015 quote can still be in the January 2018 price.
 - *Dependence.* Sets of one theme move together. The t-statistics are robust to heteroskedasticity (HC1) for numeric variables and classical for theme dummies, but none is clustered by theme, so they may overstate significance. With essentially one time period, the effective sample in time is small.
 - *Sample.* `r nrow(raw_2015) - nrow(sets)` sets are dropped in 2015, `r sum(is.na(sets$p_end))` have no 2018-2019 price and `r sum(is.na(sets$p_jan18))` no January 2018 price. These are probably the least traded, so the results lean towards liquid sets.
-- *Models.* Ridge, LASSO and elastic net choose their penalty by cross-validation inside each training fold; the tree, random forest and XGBoost use fixed settings from the course. The model ranking in H2 is indicative.
+- *Models.* Ridge, LASSO and elastic net choose their penalty by cross-validation inside each training fold; the tree, random forest and XGBoost use fixed settings. The model ranking in H2 is indicative.
 
 # 5. Conclusion
 
@@ -666,5 +662,3 @@ kable(h3_tab, caption = "Premium reversal: predictive power, key factor and sign
 3. **H3~0~, the 2015 premium has no effect on forward returns: rejected.** The premium coefficient is `r f3(ct_mom$Estimate[ct_mom$Term == "prem15"])` (robust t `r f2(ct_mom$t[ct_mom$Term == "prem15"])`) for 2015-19 and `r f3(ct_cw$Estimate[ct_cw$Term == "prem15"])` (robust t `r f2(ct_cw$t[ct_cw$Term == "prem15"])`) in the clean window. Stale quotes, theme fashions and re-releases remain possible explanations, so the reversal is not proven.
 
 In-sample hedonic fits overstate what is predictable; the test design matters more than the model class.
-
-*Data:* Dobrynskaya and Kishilova, Mendeley Data v9hhs66vm3 ("DiB whole sample Dec 2015 prices", "DiB whole sample Jan 2018 - Apr 2019 prices"); data description in the sheet "About the sample". *Methods:* Roberts et al. (2017), *Ecography* 40 (grouped cross-validation); Models and metrics as in the course homeworks (Coqueret and Guida, Chapters 5 and 6).
